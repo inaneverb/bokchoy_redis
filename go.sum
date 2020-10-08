@@ -38,6 +38,9 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/qioalice/bokchoy v1.0.2 h1:aZmzjsptfko5zbX+iHwQqX9G+ev+xfgaWnZ/L8o6Nrc=
 github.com/qioalice/bokchoy v1.0.2/go.mod h1:+LmWC+Yvp4s3Q4n41IwV09JC9KoFRvL3rvp/tq71OXc=
+github.com/qioalice/bokchoy v1.0.3 h1:iNRJ/5RNkbaPxRmuldJVyFAsjtePAGhT7AovbsrMEeI=
+github.com/qioalice/bokchoy v1.0.3/go.mod h1:+LmWC+Yvp4s3Q4n41IwV09JC9KoFRvL3rvp/tq71OXc=
+github.com/qioalice/bokchoy v1.0.4/go.mod h1:U9/YBRQ86soRUQbBjbrDQi57gGcB3ctXG19LuRkFO/0=
 github.com/qioalice/ekago/v2 v2.8.8 h1:XrsglnsRRuGbZmeAcHHzkYnpodBAUzD8W2gajO9r81c=
 github.com/qioalice/ekago/v2 v2.8.8/go.mod h1:PXbUc0aowADl5dc43adTcAWaKFmXxvotBIqd1HKsz5g=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
