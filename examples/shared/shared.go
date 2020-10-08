@@ -20,8 +20,10 @@ package shared
 
 import (
 	"fmt"
+	"github.com/modern-go/reflect2"
 
 	"github.com/qioalice/ekago/v2/ekaerr"
+	"github.com/qioalice/ekago/v2/ekatime"
 
 	"github.com/qioalice/bokchoy"
 	"github.com/qioalice/bokchoy_redis"
@@ -29,9 +31,20 @@ import (
 	"github.com/go-redis/redis/v7"
 )
 
-const DSN = `redis://127.0.0.1:6379/14`
+const (
+	DSN = `redis://127.0.0.1:6379/14`
+)
 
-var TestQueue *bokchoy.Queue
+type (
+	UserDefinedPayloadType struct {
+		Text      string
+		Timestamp ekatime.Timestamp
+	}
+)
+
+var (
+	TestQueue *bokchoy.Queue
+)
 
 func init() {
 	const s = "BokchoyExample: Failed to initialize. "
@@ -47,9 +60,12 @@ func init() {
 	redisClient := redis.NewClient(redisOptions)
 	bokchoyRedisBroker := bokchoy_redis.NewBroker(redisClient)
 
+	payloadDesiredType := reflect2.TypeOf(new(UserDefinedPayloadType))
+	jsonSerializer := bokchoy.CustomSerializerJSON(payloadDesiredType)
+
 	bokchoy.Init(
 		bokchoy.WithBroker(bokchoyRedisBroker),
-		bokchoy.WithSerializer(bokchoy.DefaultSerializerJSON()),
+		bokchoy.WithSerializer(jsonSerializer),
 	)
 
 	TestQueue = bokchoy.GetQueue("test-queue")

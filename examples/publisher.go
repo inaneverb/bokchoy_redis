@@ -44,12 +44,7 @@ func iter(reader *bufio.Reader) {
 	text = strings.TrimSpace(text)
 	fmt.Println()
 
-	type Payload struct {
-		Text      string
-		Timestamp ekatime.Timestamp
-	}
-
-	_, err := shared.TestQueue.Publish(&Payload{
+	_, err := shared.TestQueue.Publish(&shared.UserDefinedPayloadType{
 		Text:      text,
 		Timestamp: ekatime.Now(),
 	})
