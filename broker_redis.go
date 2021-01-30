@@ -25,10 +25,10 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/qioalice/ekago/v2/ekadanger"
 	"github.com/qioalice/ekago/v2/ekaerr"
 	"github.com/qioalice/ekago/v2/ekalog"
 	"github.com/qioalice/ekago/v2/ekatime"
+	"github.com/qioalice/ekago/v2/ekaunsafe"
 
 	"github.com/qioalice/bokchoy"
 
@@ -57,7 +57,7 @@ func NewBroker(clt redis.UniversalClient) *RedisBroker {
 func NewBrokerCustomLogger(clt redis.UniversalClient, logger *ekalog.Logger) *RedisBroker {
 
 	clientInfo := "<Incorrect Redis client>"
-	if clt != nil && ekadanger.TakeRealAddr(clt) != nil {
+	if clt != nil && ekaunsafe.TakeRealAddr(clt) != nil {
 
 		// Go to options and extract address.
 		// C-style magic.
