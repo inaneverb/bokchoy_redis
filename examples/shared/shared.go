@@ -55,7 +55,7 @@ func init() {
 	ekaerr.InitializationFailed.
 		Wrap(legacyErr, s+"Incorrect DSN.").
 		AddFields("bokchoy_example_incorrect_dsn", DSN).
-		LogAsFatalww(s, nil)
+		LogAsFatal(s)
 
 	redisClient := redis.NewClient(redisOptions)
 	bokchoyRedisBroker := bokchoy_redis.NewBroker(redisClient)
@@ -66,7 +66,8 @@ func init() {
 	bokchoy.Init(
 		bokchoy.WithBroker(bokchoyRedisBroker),
 		bokchoy.WithSerializer(jsonSerializer),
-	)
+	).
+		LogAsFatal(s)
 
 	TestQueue = bokchoy.GetQueue("test-queue")
 }
