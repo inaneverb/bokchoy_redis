@@ -20,7 +20,7 @@ package shared
 
 import (
 	"fmt"
-	"github.com/modern-go/reflect2"
+	"time"
 
 	"github.com/qioalice/ekago/v2/ekaerr"
 	"github.com/qioalice/ekago/v2/ekatime"
@@ -29,10 +29,11 @@ import (
 	"github.com/qioalice/bokchoy_redis"
 
 	"github.com/go-redis/redis/v7"
+	"github.com/modern-go/reflect2"
 )
 
 const (
-	DSN = `redis://127.0.0.1:6379/14`
+	DSN = `redis://default:root@127.0.0.1:6379/14`
 )
 
 type (
@@ -66,6 +67,11 @@ func init() {
 	bokchoy.Init(
 		bokchoy.WithBroker(bokchoyRedisBroker),
 		bokchoy.WithSerializer(jsonSerializer),
+		bokchoy.WithRetryIntervals([]time.Duration{
+			2 * time.Second,
+			4 * time.Second,
+			10 * time.Second,
+		}),
 	).
 		LogAsFatal(s)
 
