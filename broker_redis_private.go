@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/qioalice/ekago/v2/ekaerr"
-	"github.com/qioalice/ekago/v2/ekatime"
 
 	"github.com/qioalice/bokchoy"
 
@@ -94,7 +93,7 @@ func (p *RedisBroker) consumeDelayedWorker(
 ) (
 	continue_ bool,
 ) {
-	maxEta := ekatime.Now()
+	maxEta := time.Now().UnixNano()
 
 	encodedTasks, err := p.consume(delayedQueueName, originalQueueName, maxEta)
 	if err.IsNotNil() && p.logger.IsValid() {
@@ -134,7 +133,7 @@ func (p *RedisBroker) consumeDelayedWorker(
 		legacyErr := pipe.ZRemRangeByScore(
 			delayedQueueName,
 			"0",
-			strconv.FormatInt(maxEta.I64(), 10),
+			strconv.FormatInt(maxEta, 10),
 		).Err()
 		if legacyErr != nil {
 			return legacyErr
@@ -170,58 +169,55 @@ func (p *RedisBroker) consume(
 
 	queueName string,
 	taskPrefix string,
-	eta ekatime.Timestamp,
+	etaUnixNano int64,
 ) (
 	[][]byte,
 	*ekaerr.Error,
 ) {
-	//const s = "failee"fe3f3fe
-	// todo: remove queue name from log only keys
+	const s = "Bokchoy: Failed to retrieve payloads (consume). "
+
 	var (
 		result   []string
 		queueKey = p.buildKey(queueName, "")
+
+		legacyErr        error
+		usedRedisCommand string
 	)
 
-	if eta == 0 {
+	switch {
+
+	case etaUnixNano == 0:
 		p.consumeDelayed(queueName, 1*time.Second)
-
-		result_, legacyErr := p.client.BRPop(1*time.Second, queueKey).Result()
-		if legacyErr != nil && legacyErr != redis.Nil {
-			return nil, ekaerr.ExternalError.
-				Wrap(legacyErr, "Bokchoy: Failed to retrieve payloads (consume)").
-				AddFields(
-					"bokchoy_queue_key", queueKey,
-					"bokchoy_queue_name", queueName,
-					"bokchoy_task_prefix", taskPrefix,
-					"bokchoy_error_redis_command", "BRPOP").
-				Throw()
-		}
-
-		if len(result_) > 0 {
+		results := p.client.BRPop(1*time.Second, queueKey)
+		legacyErr = results.Err()
+		if (legacyErr == nil || legacyErr == redis.Nil) && len(results.Val()) > 0 {
 			// result[0] is the queue key
 			// See returned results here: https://redis.io/commands/brpop
-			result = result_[1:]
+			result = results.Val()[1:]
 		}
+		usedRedisCommand = "BRPOP"
 
-	} else {
-
+	default:
 		results := p.client.ZRangeByScore(queueKey, &redis.ZRangeBy{
 			Min: "0",
-			Max: strconv.FormatInt(eta.I64(), 10),
+			Max: strconv.FormatInt(etaUnixNano, 10),
 		})
-
-		if legacyErr := results.Err(); legacyErr != nil && legacyErr != redis.Nil {
-			return nil, ekaerr.ExternalError.
-				Wrap(legacyErr, "Bokchoy: Failed to retrieve payloads (consume)").
-				AddFields(
-					"bokchoy_queue_key", queueKey,
-					"bokchoy_queue_name", queueName,
-					"bokchoy_task_prefix", taskPrefix,
-					"bokchoy_error_redis_command", "ZRANGEBYSCORE").
-				Throw()
+		legacyErr = results.Err()
+		if legacyErr == nil || legacyErr == redis.Nil {
+			result = results.Val()
 		}
+		usedRedisCommand = "ZRANGEBYSCORE"
+	}
 
-		result = results.Val()
+	if legacyErr != nil && legacyErr != redis.Nil {
+		return nil, ekaerr.ExternalError.
+			Wrap(legacyErr, s).
+			AddFields(
+				"bokchoy_queue_key", queueKey,
+				"bokchoy_queue_name", queueName,
+				"bokchoy_task_prefix", taskPrefix,
+				"bokchoy_error_redis_command", usedRedisCommand).
+			Throw()
 	}
 
 	if len(result) == 0 {
@@ -237,10 +233,16 @@ func (p *RedisBroker) consume(
 		taskKeys = append(taskKeys, p.buildKey(taskPrefix, result[i]))
 	}
 
-	encodedTasks, err := p.getMany(taskKeys)
-	if err.IsNotNil() {
+	var (
+		encodedTasks [][]byte
+		err          *ekaerr.Error
+	)
+
+	switch encodedTasks, err = p.getMany(taskKeys); {
+
+	case err.IsNotNil():
 		return nil, err.
-			AddMessage("Bokchoy: Failed to retrieve payloads (consume)").
+			AddMessage(s).
 			AddFields(
 				"bokchoy_queue_key", queueKey,
 				"bokchoy_queue_name", queueName,
@@ -257,73 +259,57 @@ func (p *RedisBroker) publish(
 	queueName,
 	taskID string,
 	data []byte,
-	eta ekatime.Timestamp,
+	etaUnixNano int64,
 
 ) *ekaerr.Error {
 
+	const s = "Bokchoy: Failed to publish task. "
+
 	prefixedTaskKey := p.buildKey(queueName, taskID)
 
-	legacyErr := client.Set(prefixedTaskKey, data, 0).Err()
-	if legacyErr != nil {
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, "Bokchoy: Failed to publish task. "+
-				"Failed to save payload of task").
-			AddFields(
-				"bokchoy_task_key", prefixedTaskKey,
-				"bokchoy_task_id", taskID,
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", "SET").
-			Throw()
+	var (
+		legacyErr        error
+		logMessage       string
+		usedRedisCommand string
+	)
+
+	if legacyErr = client.Set(prefixedTaskKey, data, 0).Err(); legacyErr != nil {
+		logMessage = "Failed to save payload of task."
+		usedRedisCommand = "SET"
 	}
 
-	if eta == 0 {
+	//goland:noinspection GoNilness
+	switch continue_, now := legacyErr == nil, time.Now().UnixNano(); {
 
+	case continue_ && etaUnixNano == 0:
 		legacyErr = client.RPush(p.buildKey(queueName, ""), taskID).Err()
-		if legacyErr != nil {
-			return ekaerr.ExternalError.
-				Wrap(legacyErr, "Bokchoy: Failed to publish task. "+
-					"Failed to add task to the queue").
-				AddFields(
-					"bokchoy_task_key", prefixedTaskKey,
-					"bokchoy_task_id", taskID,
-					"bokchoy_queue_name", queueName,
-					"bokchoy_error_redis_command", "RPUSH").
-				Throw()
-		}
+		logMessage = "Failed to publish task."
+		usedRedisCommand = "RPUSH"
 
-	} else if now := ekatime.Now(); eta <= now {
+	case continue_ && etaUnixNano <= now:
 		// if eta is before now, then we should push this taskID in priority
-
 		legacyErr = client.LPush(p.buildKey(queueName, ""), taskID).Err()
-		if legacyErr != nil {
-			return ekaerr.ExternalError.
-				Wrap(legacyErr, "Bokchoy: Failed to publish task. "+
-					"Failed to add task to the queue").
-				AddFields(
-					"bokchoy_task_key", prefixedTaskKey,
-					"bokchoy_task_id", taskID,
-					"bokchoy_queue_name", queueName,
-					"bokchoy_error_redis_command", "LPUSH").
-				Throw()
-		}
+		logMessage = "Failed to publish task."
+		usedRedisCommand = "LPUSH"
 
-	} else {
-
+	default:
 		legacyErr = client.ZAdd(p.buildKey(queueName+":delay", ""), &redis.Z{
 			Score:  float64(now),
 			Member: taskID,
 		}).Err()
-		if legacyErr != nil {
-			return ekaerr.ExternalError.
-				Wrap(legacyErr, "Bokchoy: Failed to publish task. "+
-					"Failed to add task to the queue").
-				AddFields(
-					"bokchoy_task_key", prefixedTaskKey,
-					"bokchoy_task_id", taskID,
-					"bokchoy_queue_name", queueName,
-					"bokchoy_error_redis_command", "ZADD").
-				Throw()
-		}
+		logMessage = "Failed to publish task."
+		usedRedisCommand = "ZADD"
+	}
+
+	if legacyErr != nil {
+		return ekaerr.ExternalError.
+			Wrap(legacyErr, s+logMessage).
+			AddFields(
+				"bokchoy_task_key", prefixedTaskKey,
+				"bokchoy_task_id", taskID,
+				"bokchoy_queue_name", queueName,
+				"bokchoy_error_redis_command", usedRedisCommand).
+			Throw()
 	}
 
 	return nil

@@ -27,7 +27,6 @@ import (
 
 	"github.com/qioalice/ekago/v2/ekaerr"
 	"github.com/qioalice/ekago/v2/ekalog"
-	"github.com/qioalice/ekago/v2/ekatime"
 	"github.com/qioalice/ekago/v2/ekaunsafe"
 
 	"github.com/qioalice/bokchoy"
@@ -49,7 +48,17 @@ type (
 
 var _ bokchoy.Broker = (*RedisBroker)(nil)
 
-func NewBroker(clt redis.UniversalClient) *RedisBroker {
+func NewBroker(clt redis.UniversalClient, options ...Option) *RedisBroker {
+
+	defaultOptionsCopy := *defaultOptions
+	optionsObject := &defaultOptionsCopy
+
+	for i, n := 0, len(options); i < n; i++ {
+		if options[i] != nil {
+			options[i](optionsObject)
+		}
+	}
+
 	return NewBrokerCustomLogger(clt, ekalog.With())
 }
 
@@ -166,8 +175,8 @@ func (p RedisBroker) Ping() *ekaerr.Error {
 }
 
 // Consume returns an array of raw data.
-func (p *RedisBroker) Consume(name string, eta ekatime.Timestamp) ([][]byte, *ekaerr.Error) {
-	encodedTasks, err := p.consume(name, name, eta)
+func (p *RedisBroker) Consume(name string, etaUnixNano int64) ([][]byte, *ekaerr.Error) {
+	encodedTasks, err := p.consume(name, name, etaUnixNano)
 	return encodedTasks, err.
 		Throw()
 }
@@ -300,7 +309,7 @@ func (p *RedisBroker) Publish(
 	queueName,
 	taskID string,
 	data []byte,
-	eta ekatime.Timestamp,
+	eta int64,
 
 ) *ekaerr.Error {
 
