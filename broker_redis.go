@@ -37,33 +37,19 @@ import (
 type (
 	// RedisBroker is the redis broker.
 	RedisBroker struct {
-		client     redis.UniversalClient
-		clientInfo string
-		logger     *ekalog.Logger
-		scripts    map[string]string
-		mu         *sync.Mutex
-		qcd        map[string]struct{} // queues must be consumed delayed
+		client       redis.UniversalClient
+		clientInfo   string
+		logger       *ekalog.Logger
+		tickInterval time.Duration
+		mu           *sync.Mutex
+		qcd          map[string]struct{} // queues must be consumed delayed
 	}
 )
 
 var _ bokchoy.Broker = (*RedisBroker)(nil)
 
+// NewBroker initializes a new redis broker instance.
 func NewBroker(clt redis.UniversalClient, options ...Option) *RedisBroker {
-
-	defaultOptionsCopy := *defaultOptions
-	optionsObject := &defaultOptionsCopy
-
-	for i, n := 0, len(options); i < n; i++ {
-		if options[i] != nil {
-			options[i](optionsObject)
-		}
-	}
-
-	return NewBrokerCustomLogger(clt, ekalog.With())
-}
-
-// NewRedisBroker initializes a new redis broker instance.
-func NewBrokerCustomLogger(clt redis.UniversalClient, logger *ekalog.Logger) *RedisBroker {
 
 	clientInfo := "<Incorrect Redis client>"
 	if clt != nil && ekaunsafe.TakeRealAddr(clt) != nil {
@@ -134,13 +120,31 @@ func NewBrokerCustomLogger(clt redis.UniversalClient, logger *ekalog.Logger) *Re
 		}
 	}
 
-	return &RedisBroker{
-		client:     clt,
-		clientInfo: clientInfo,
-		logger:     logger,
-		qcd:        make(map[string]struct{}),
-		mu:         &sync.Mutex{},
+	defaultOptionsCopy := *defaultOptions
+	optionsObject := &defaultOptionsCopy
+
+	for i, n := 0, len(options); i < n; i++ {
+		if options[i] != nil {
+			options[i](optionsObject)
+		}
 	}
+
+	br := &RedisBroker{
+		client:       clt,
+		clientInfo:   clientInfo,
+		logger:       ekalog.With(),
+		tickInterval: optionsObject.TickInterval,
+		qcd:          make(map[string]struct{}),
+		mu:           &sync.Mutex{},
+	}
+
+	// User can "disable" logging passing nil or invalid logger.
+	// Thus there is no either nil check nor logger.IsValid() call.
+	if optionsObject.loggerIsPresented {
+		br.logger = optionsObject.Logger
+	}
+
+	return br
 }
 
 func (p *RedisBroker) String() string {

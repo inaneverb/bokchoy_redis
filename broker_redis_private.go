@@ -187,7 +187,7 @@ func (p *RedisBroker) consume(
 	switch {
 
 	case etaUnixNano == 0:
-		p.consumeDelayed(queueName, 1*time.Second)
+		p.consumeDelayed(queueName, p.tickInterval)
 		results := p.client.BRPop(1*time.Second, queueKey)
 		legacyErr = results.Err()
 		if (legacyErr == nil || legacyErr == redis.Nil) && len(results.Val()) > 0 {
