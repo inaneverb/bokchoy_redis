@@ -19,29 +19,126 @@
 package bokchoy_redis
 
 import (
-	"strconv"
+	"reflect"
 	"strings"
-	"time"
+	"unsafe"
 
 	"github.com/qioalice/ekago/v2/ekaerr"
 
 	"github.com/qioalice/bokchoy"
-
-	"github.com/go-redis/redis/v7"
 )
 
-// buildKey builds key for Redis values, like:
-// "bokchoy/<part1>/<part2>" if both of 'part1', 'part2' are presented and not empty,
-// or "bokchoy/<part1>", "bokchoy//<part2>" if only one of 'part1', 'part2' is presented.
-func (_ *RedisBroker) buildKey(part1, part2 string) string {
-	return bokchoy.BuildKey("bokchoy", part1, part2)
+//goland:noinspection SpellCheckingInspection,GoSnakeCaseUsage
+const (
+
+	// AUXILIARY REDIS FUNCTIONS
+	//
+	//  - KEYSREM pattern.
+	//    Removes all keys with passed pattern.
+	//    Returns: {$1, $2}:
+	//      $1: How much inner SCAN calls has been passed,
+	//      $2: How much keys has been deleted.
+	//
+	//  - QDPOPTASKS key max
+	//
+
+	_RS_KEYSREM = `
+local cursor = 0
+local calls = 0
+local dels = 0
+repeat
+    local result = redis.call('SCAN', cursor, 'MATCH', ARGV[1])
+    calls = calls + 1
+    for _,key in ipairs(result[2]) do
+        redis.call('UNLINK', key)
+        dels = dels + 1
+    end
+    cursor = tonumber(result[1])
+until cursor == 0
+return {calls, dels}
+`
+	_RS_QDPOPTASKS = `
+local queueKey = KEYS[1]
+local max = ARGV[1]
+local results = redis.call('ZRANGEBYSCORE', queueKey..':delay', '0', max)
+local length = #results
+if length > 0 then
+    redis.call('ZREMRANGEBYSCORE', queueKey..':delay', '0', max)
+    return results
+else
+    return nil
+end
+`
+	_RS_QDUPTASKS = `
+local queueKey = KEYS[1]
+local max = ARGV[1]
+local results = redis.call('ZRANGEBYSCORE', queueKey..':delay', '0', max)
+local length = #results
+if length > 0 then
+    redis.call('ZREMRANGEBYSCORE', queueKey..':delay', '0', max)
+    redis.call('RPUSH', queueKey, unpack(results))
+    return length
+else
+    return nil
+end
+`
+	_RS_QRPUSHTASK = `
+local queueKey = KEYS[1]
+local taskId = ARGV[1]
+local data = ARGV[2]
+redis.call('SET', queueKey..'/'..taskId, data)
+redis.call('RPUSH', queueKey, taskId)
+return {ok='OK'}
+`
+	_RS_QLPUSHTASK = `
+local queueKey = KEYS[1]
+local taskId = ARGV[1]
+local data = ARGV[2]
+redis.call('SET', queueKey..'/'..taskId, data)
+redis.call('LPUSH', queueKey, taskId)
+return{ok='OK'}
+`
+	_RS_QDPUSHTASK = `
+local queueKey = KEYS[1]
+local taskId = ARGV[1]
+local score = ARGV[2]
+local data = ARGV[3]
+redis.call('SET', queueKey..'/'..taskId, data)
+redis.call('ZADD', queueKey..':delay', score, taskId)
+return{ok='OK'}
+`
+	_RS_QSTAT = `
+local queueKey = KEYS[1]
+local llen = redis.call('LLEN', queueKey)
+local zcount = redis.call('ZCOUNT', queueKey..':delay', '-inf', '+inf')
+return {llen, zcount}
+`
+)
+
+// Make sure RedisBroker implements bokchoy.Broker interface.
+// Compilation time error otherwise.
+var _ bokchoy.Broker = (*RedisBroker)(nil)
+
+// isValid reports whether the current RedisBroker is valid,
+// and has been instantiated properly, using its constructor.
+func (p *RedisBroker) isValid() bool {
+	return p != nil && p.client != nil
 }
 
+// getMany tries to retrieve an encoded RAW data of bokchoy.Task s,
+// the key of which are passed.
 func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
-	const s = "Bokchoy: Failed to get many tasks by its keys. "
+	const s = "Bokchoy.RedisBroker: Failed to get many tasks by its keys. "
 
-	encodedTasks, legacyErr := p.client.MGet(taskKeys...).Result()
-	if legacyErr != nil {
+	var (
+		encodedTasks []interface{}
+		legacyErr    error
+	)
+
+	switch encodedTasks, legacyErr =
+		p.client.MGet(taskKeys...).Result(); {
+
+	case legacyErr != nil:
 		return nil, ekaerr.ExternalError.
 			Wrap(legacyErr, s).
 			AddFields(
@@ -50,267 +147,36 @@ func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
 			Throw()
 	}
 
-	ret := make([][]byte, len(encodedTasks))
-	for i, n := 0, len(encodedTasks); i < n; i++ {
-		ret[i] = []byte(encodedTasks[i].(string))
-	}
-
-	return ret, nil
-}
-
-func (p *RedisBroker) consumeDelayed(queueName string, tickInterval time.Duration) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	consumeDelayedWorkerEach := func(
-		p *RedisBroker,
-		delayedQueueName,
-		originalQueueName string,
-		tickInterval time.Duration,
-	) {
-		ticker := time.NewTicker(tickInterval)
-		for range ticker.C {
-			continue_ := p.consumeDelayedWorker(originalQueueName, delayedQueueName)
-			if !continue_ {
-				return
-			}
-		}
-	}
-
-	delayedQueueName := queueName + ":delay"
-	_, consumeWorkerAlreadyRunning := p.qcd[delayedQueueName]
-
-	if !consumeWorkerAlreadyRunning {
-		go consumeDelayedWorkerEach(p, delayedQueueName, queueName, tickInterval)
-		p.qcd[delayedQueueName] = struct{}{}
-	}
-}
-
-func (p *RedisBroker) consumeDelayedWorker(
-
-	originalQueueName,
-	delayedQueueName string,
-) (
-	continue_ bool,
-) {
-	maxEta := time.Now().UnixNano()
-
-	encodedTasks, err := p.consume(delayedQueueName, originalQueueName, maxEta)
-	if err.IsNotNil() && p.logger.IsValid() {
-		err.LogAsErrorwUsing(p.logger,
-			"Bokchoy: Failed to retrieve delayed payloads (consume)")
-	}
-
-	if len(encodedTasks) == 0 {
-		return true
-	}
-
-	tasks := make([]bokchoy.Task, len(encodedTasks))
-	for i, n := 0, len(encodedTasks); i < n; i++ {
-		err := tasks[i].Deserialize(encodedTasks[i], bokchoy.DefaultSerializerDummy())
-		if err.IsNotNil() {
-			panic(err) // todo
-		}
-	}
-
-	_, legacyErr := p.client.TxPipelined(func(pipe redis.Pipeliner) error {
-		for i, encodedTask := range encodedTasks {
-			taskID := tasks[i].ID()
-
-			err := p.publish(pipe, originalQueueName, taskID, encodedTask, 0)
-			if err != nil {
-				err.
-					AddMessage("Bokchoy: Failed to republish delayed tasks.").
-					AddFields(
-						"bokchoy_republished_before_error", i,
-						"bokchoy_republished_to_be", len(encodedTasks)).
-					Throw()
-				return wrapEkaerr(err)
-			}
-		}
-
-		// To avoid data loss, we only remove the range when results are processed
-		legacyErr := pipe.ZRemRangeByScore(
-			delayedQueueName,
-			"0",
-			strconv.FormatInt(maxEta, 10),
-		).Err()
-		if legacyErr != nil {
-			return legacyErr
-		}
-
-		return nil
-	})
-
-	if legacyErr != nil {
-		if err = extractEkaerr(legacyErr); err.IsNil() {
-			// Not *ekaerr.Error, then it's:
-			// Redis client's Exec() func error (called in TxPipelined())
-			// or pipe.ZRemRangeByScore()'s one.
-			err = ekaerr.Interrupted.
-				Wrap(legacyErr, "Bokchoy: Failed to republish delayed tasks.")
-		}
-	}
-
-	//goland:noinspection GoNilness, cause IsNotNil() call is nil safe.
-	if err.IsNotNil() && p.logger.IsValid() {
-		err.
-			AddFields(
-				"bokchoy_queue_name", originalQueueName,
-				"bokchoy_queue_name_delayed", delayedQueueName).
-			LogAsErrorwwUsing(p.logger,
-				"Failed to consume delayed tasks.", nil)
-	}
-
-	return true
-}
-
-func (p *RedisBroker) consume(
-
-	queueName string,
-	taskPrefix string,
-	etaUnixNano int64,
-) (
-	[][]byte,
-	*ekaerr.Error,
-) {
-	const s = "Bokchoy: Failed to retrieve payloads (consume). "
-
 	var (
-		result   []string
-		queueKey = p.buildKey(queueName, "")
-
-		legacyErr        error
-		usedRedisCommand string
+		encodedTasksTyped = make([][]byte, 0, len(encodedTasks))
+		encodedTaskDummy  []byte
+		hd                = (*reflect.SliceHeader)(unsafe.Pointer(&encodedTaskDummy))
 	)
+	for _, encodedTask := range encodedTasks {
+		switch encodedTaskStr, ok := encodedTask.(string); {
 
-	switch {
-
-	case etaUnixNano == 0:
-		p.consumeDelayed(queueName, p.tickInterval)
-		results := p.client.BRPop(1*time.Second, queueKey)
-		legacyErr = results.Err()
-		if (legacyErr == nil || legacyErr == redis.Nil) && len(results.Val()) > 0 {
-			// result[0] is the queue key
-			// See returned results here: https://redis.io/commands/brpop
-			result = results.Val()[1:]
-		}
-		usedRedisCommand = "BRPOP"
-
-	default:
-		results := p.client.ZRangeByScore(queueKey, &redis.ZRangeBy{
-			Min: "0",
-			Max: strconv.FormatInt(etaUnixNano, 10),
-		})
-		legacyErr = results.Err()
-		if legacyErr == nil || legacyErr == redis.Nil {
-			result = results.Val()
-		}
-		usedRedisCommand = "ZRANGEBYSCORE"
-	}
-
-	if legacyErr != nil && legacyErr != redis.Nil {
-		return nil, ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_queue_key", queueKey,
-				"bokchoy_queue_name", queueName,
-				"bokchoy_task_prefix", taskPrefix,
-				"bokchoy_error_redis_command", usedRedisCommand).
-			Throw()
-	}
-
-	if len(result) == 0 {
-		return nil, nil
-	}
-
-	taskKeys := make([]string, 0, len(result))
-	for i, n := 0, len(result); i < n; i++ {
-		if result[i] == queueName {
+		case encodedTask == nil:
 			continue
+
+		case ok:
+			hs := (*reflect.StringHeader)(unsafe.Pointer(&encodedTaskStr))
+			hd.Data = hs.Data
+			hd.Len = hs.Len
+			hd.Cap = hs.Len
+			encodedTasksTyped = append(encodedTasksTyped, encodedTaskDummy)
+
+		default:
+			// Impossible rare case.
+			// Maybe this is 3032 year and things were changed?
+			return nil, ekaerr.InternalError.
+				New(s+"MGET returns unexpected type of values. "+
+					"What is the year now?").
+				AddFields(
+					"bokchoy_task_keys", strings.Join(taskKeys, ", "),
+					"bokchoy_error_redis_command", "MGET").
+				Throw()
 		}
-
-		taskKeys = append(taskKeys, p.buildKey(taskPrefix, result[i]))
 	}
 
-	var (
-		encodedTasks [][]byte
-		err          *ekaerr.Error
-	)
-
-	switch encodedTasks, err = p.getMany(taskKeys); {
-
-	case err.IsNotNil():
-		return nil, err.
-			AddMessage(s).
-			AddFields(
-				"bokchoy_queue_key", queueKey,
-				"bokchoy_queue_name", queueName,
-				"bokchoy_task_prefix", taskPrefix).
-			Throw()
-	}
-
-	return encodedTasks, nil
-}
-
-func (p *RedisBroker) publish(
-
-	client redis.Cmdable,
-	queueName,
-	taskID string,
-	data []byte,
-	etaUnixNano int64,
-
-) *ekaerr.Error {
-
-	const s = "Bokchoy: Failed to publish task. "
-
-	prefixedTaskKey := p.buildKey(queueName, taskID)
-
-	var (
-		legacyErr        error
-		logMessage       string
-		usedRedisCommand string
-	)
-
-	if legacyErr = client.Set(prefixedTaskKey, data, 0).Err(); legacyErr != nil {
-		logMessage = "Failed to save payload of task."
-		usedRedisCommand = "SET"
-	}
-
-	//goland:noinspection GoNilness
-	switch continue_, now := legacyErr == nil, time.Now().UnixNano(); {
-
-	case continue_ && etaUnixNano == 0:
-		legacyErr = client.RPush(p.buildKey(queueName, ""), taskID).Err()
-		logMessage = "Failed to publish task."
-		usedRedisCommand = "RPUSH"
-
-	case continue_ && etaUnixNano <= now:
-		// if eta is before now, then we should push this taskID in priority
-		legacyErr = client.LPush(p.buildKey(queueName, ""), taskID).Err()
-		logMessage = "Failed to publish task."
-		usedRedisCommand = "LPUSH"
-
-	default:
-		legacyErr = client.ZAdd(p.buildKey(queueName+":delay", ""), &redis.Z{
-			Score:  float64(now),
-			Member: taskID,
-		}).Err()
-		logMessage = "Failed to publish task."
-		usedRedisCommand = "ZADD"
-	}
-
-	if legacyErr != nil {
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s+logMessage).
-			AddFields(
-				"bokchoy_task_key", prefixedTaskKey,
-				"bokchoy_task_id", taskID,
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", usedRedisCommand).
-			Throw()
-	}
-
-	return nil
+	return encodedTasksTyped, nil
 }
