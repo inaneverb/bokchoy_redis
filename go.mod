@@ -7,7 +7,7 @@ require (
 	github.com/go-redis/redis/v7 v7.4.0
 	github.com/json-iterator/go v1.1.10 // indirect
 	github.com/modern-go/reflect2 v1.0.1
-	github.com/qioalice/bokchoy v1.1.0
+	github.com/qioalice/bokchoy v1.3.0
 	github.com/qioalice/ekago/v2 v2.9.7
 	github.com/tinylib/msgp v1.1.5 // indirect
 )

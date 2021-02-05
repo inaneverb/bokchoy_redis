@@ -61,7 +61,6 @@ func onStartCallback(task *bokchoy.Task) *ekaerr.Error {
 	var b bytes.Buffer
 	b.WriteString(fmt.Sprintln("It's [onStart] callback."))
 	b.WriteString(fmt.Sprintln(">  Task ID: ", task.ID()))
-	b.WriteString(fmt.Sprintln(">  Queue name: ", task.QueueName()))
 	b.WriteString(fmt.Sprintln(">  Payload dump: "))
 	spew.Fdump(&b, task.Payload)
 	b.WriteByte('\n')
@@ -73,7 +72,6 @@ func onSucceededCallback(task *bokchoy.Task) *ekaerr.Error {
 	var b bytes.Buffer
 	b.WriteString(fmt.Sprintln("It's [onSuccess] callback."))
 	b.WriteString(fmt.Sprintln(">  Task ID: ", task.ID()))
-	b.WriteString(fmt.Sprintln(">  Queue name: ", task.QueueName()))
 	b.WriteString(fmt.Sprintln(">  Payload dump: "))
 	spew.Fdump(&b, task.Payload)
 	b.WriteByte('\n')
@@ -84,8 +82,8 @@ func onSucceededCallback(task *bokchoy.Task) *ekaerr.Error {
 func onFailureCallback(task *bokchoy.Task) *ekaerr.Error {
 	var b bytes.Buffer
 	b.WriteString(fmt.Sprintln("It's [onFailure] callback."))
+	b.WriteString(fmt.Sprintln(">  Retry number: ", task.MaxRetries))
 	b.WriteString(fmt.Sprintln(">  Task ID: ", task.ID()))
-	b.WriteString(fmt.Sprintln(">  Queue name: ", task.QueueName()))
 	b.WriteString(fmt.Sprintln(">  Payload dump: "))
 	spew.Fdump(&b, task.Payload)
 	b.WriteByte('\n')
@@ -97,7 +95,6 @@ func onCompleteCallback(task *bokchoy.Task) *ekaerr.Error {
 	var b bytes.Buffer
 	b.WriteString(fmt.Sprintln("It's [onComplete] callback."))
 	b.WriteString(fmt.Sprintln(">  Task ID: ", task.ID()))
-	b.WriteString(fmt.Sprintln(">  Queue name: ", task.QueueName()))
 	b.WriteString(fmt.Sprintln(">  Payload dump: "))
 	spew.Fdump(&b, task.Payload)
 	b.WriteByte('\n')
@@ -109,7 +106,6 @@ func handler(task *bokchoy.Task) *ekaerr.Error {
 	var b bytes.Buffer
 	b.WriteString(fmt.Sprintln("HANDLER"))
 	b.WriteString(fmt.Sprintln(">  Task ID: ", task.ID()))
-	b.WriteString(fmt.Sprintln(">  Queue name: ", task.QueueName()))
 	b.WriteString(fmt.Sprintln(">  Payload dump: "))
 	spew.Fdump(&b, task.Payload)
 	b.WriteByte('\n')

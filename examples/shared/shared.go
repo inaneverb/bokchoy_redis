@@ -29,11 +29,10 @@ import (
 	"github.com/qioalice/bokchoy_redis"
 
 	"github.com/go-redis/redis/v7"
-	"github.com/modern-go/reflect2"
 )
 
 const (
-	DSN = `redis://default:root@127.0.0.1:6379/14`
+	DSN = `redis://127.0.0.1:6379/14`
 )
 
 type (
@@ -58,22 +57,21 @@ func init() {
 		AddFields("bokchoy_example_incorrect_dsn", DSN).
 		LogAsFatal(s)
 
-	redisClient := redis.NewClient(redisOptions)
-	bokchoyRedisBroker := bokchoy_redis.NewBroker(redisClient)
+	bokchoyRedisBroker, err := bokchoy_redis.NewBroker(
+		bokchoy_redis.WithRedisClient(redis.NewClient(redisOptions)),
+	)
+	err.LogAsFatal()
 
-	payloadDesiredType := reflect2.TypeOf(new(UserDefinedPayloadType))
-	jsonSerializer := bokchoy.CustomSerializerJSON(payloadDesiredType)
-
-	bokchoy.Init(
+	err = bokchoy.Init(
 		bokchoy.WithBroker(bokchoyRedisBroker),
-		bokchoy.WithSerializer(jsonSerializer),
+		bokchoy.WithSerializer(bokchoy.CustomSerializerJSON(UserDefinedPayloadType{})),
 		bokchoy.WithRetryIntervals([]time.Duration{
 			2 * time.Second,
 			4 * time.Second,
 			10 * time.Second,
 		}),
-	).
-		LogAsFatal(s)
+	)
+	err.LogAsFatal(s)
 
 	TestQueue = bokchoy.GetQueue("test-queue")
 }
