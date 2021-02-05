@@ -64,7 +64,7 @@ func init() {
 
 	err = bokchoy.Init(
 		bokchoy.WithBroker(bokchoyRedisBroker),
-		bokchoy.WithSerializer(bokchoy.CustomSerializerJSON(UserDefinedPayloadType{})),
+		bokchoy.WithCustomSerializerJSON(UserDefinedPayloadType{}),
 		bokchoy.WithRetryIntervals([]time.Duration{
 			2 * time.Second,
 			4 * time.Second,
