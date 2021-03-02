@@ -173,6 +173,7 @@ func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
 					"What is the year now?").
 				AddFields(
 					"bokchoy_task_keys", strings.Join(taskKeys, ", "),
+					"bokchoy_encoded_task_type", reflect.TypeOf(encodedTask).String(),
 					"bokchoy_error_redis_command", "MGET").
 				Throw()
 		}
