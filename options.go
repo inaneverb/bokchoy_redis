@@ -20,9 +20,9 @@ package bokchoy_redis
 import (
 	"time"
 
-	"github.com/qioalice/ekago/v2/ekalog"
+	"github.com/qioalice/ekago/v3/ekalog"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/mediocregopher/radix/v4"
 )
 
 // Option is an option unit.
@@ -31,7 +31,7 @@ type (
 )
 
 // WithRedisClient defines Redis client that will be used as Bokchoy's broker backend.
-func WithRedisClient(client redis.UniversalClient) Option {
+func WithRedisClient(client radix.Client) Option {
 	return func(opts *options) {
 		opts.Client = client
 	}
@@ -41,7 +41,6 @@ func WithRedisClient(client redis.UniversalClient) Option {
 func WithLogger(logger *ekalog.Logger) Option {
 	return func(opts *options) {
 		opts.Logger = logger
-		opts.loggerIsPresented = true
 	}
 }
 

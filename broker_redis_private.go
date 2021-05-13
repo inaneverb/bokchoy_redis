@@ -19,13 +19,15 @@
 package bokchoy_redis
 
 import (
-	"reflect"
-	"strings"
-	"unsafe"
+	"context"
+	"time"
 
-	"github.com/qioalice/ekago/v2/ekaerr"
+	"github.com/qioalice/ekago/v3/ekaerr"
+	"github.com/qioalice/ekago/v3/ekastr"
 
 	"github.com/qioalice/bokchoy"
+
+	"github.com/mediocregopher/radix/v4"
 )
 
 //goland:noinspection SpellCheckingInspection,GoSnakeCaseUsage
@@ -130,54 +132,98 @@ func (p *RedisBroker) isValid() bool {
 func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
 	const s = "Bokchoy.RedisBroker: Failed to get many tasks by its keys. "
 
-	var (
-		encodedTasks []interface{}
-		legacyErr    error
-	)
-
-	switch encodedTasks, legacyErr =
-		p.client.MGet(taskKeys...).Result(); {
-
-	case legacyErr != nil:
-		return nil, ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_task_keys", strings.Join(taskKeys, ", "),
-				"bokchoy_error_redis_command", "MGET").
-			Throw()
+	var rawResp []string
+	if _, err := p.execCmd("MGET", &rawResp, CTX_TIMEOUT_DEFAULT, false, taskKeys...); err.IsNotNil() {
+		return nil, err.AddMessage(s).WithArray("bokchoy_task_keys", taskKeys).Throw()
 	}
 
-	var (
-		encodedTasksTyped = make([][]byte, 0, len(encodedTasks))
-		encodedTaskDummy  []byte
-		hd                = (*reflect.SliceHeader)(unsafe.Pointer(&encodedTaskDummy))
-	)
-	for _, encodedTask := range encodedTasks {
-		switch encodedTaskStr, ok := encodedTask.(string); {
+	if len(rawResp) == 0 {
+		return nil, nil
+	}
 
-		case encodedTask == nil:
-			continue
-
-		case ok:
-			hs := (*reflect.StringHeader)(unsafe.Pointer(&encodedTaskStr))
-			hd.Data = hs.Data
-			hd.Len = hs.Len
-			hd.Cap = hs.Len
-			encodedTasksTyped = append(encodedTasksTyped, encodedTaskDummy)
-
-		default:
-			// Impossible rare case.
-			// Maybe this is 3032 year and things were changed?
-			return nil, ekaerr.InternalError.
-				New(s+"MGET returns unexpected type of values. "+
-					"What is the year now?").
-				AddFields(
-					"bokchoy_task_keys", strings.Join(taskKeys, ", "),
-					"bokchoy_encoded_task_type", reflect.TypeOf(encodedTask).String(),
-					"bokchoy_error_redis_command", "MGET").
-				Throw()
+	resp := make([][]byte, 0, len(rawResp))
+	for i, n := 0, len(rawResp); i < n; i++ {
+		if rawResp[i] != "" && rawResp[i] != "(nil)" {
+			resp = append(resp, ekastr.S2B(rawResp[i]))
 		}
 	}
 
-	return encodedTasksTyped, nil
+	return resp, nil
+}
+
+func (p *RedisBroker) execCmd(
+	cmd               string,
+	dest              interface{},
+	timeout           time.Duration,
+	nilOrEmptyAsErr   bool,
+	args              ...string,
+) (
+	isNull            bool,
+	err               *ekaerr.Error,
+) {
+	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, args, nil)
+	return isNull, err.Throw()
+}
+
+func (p *RedisBroker) execFlatCmd(
+	cmd               string,
+	dest              interface{},
+	timeout           time.Duration,
+	nilOrEmptyAsErr   bool,
+	args              ...interface{},
+) (
+	isNull            bool,
+	err               *ekaerr.Error,
+) {
+	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, nil, args)
+	return isNull, err.Throw()
+}
+
+
+func (p *RedisBroker) do(
+	cmd               string,
+	dest              interface{},
+	timeout           time.Duration,
+	nilOrEmptyAsErr   bool,
+	argsStr           []string,
+	args              []interface{},
+) (
+	isNull            bool,
+	err               *ekaerr.Error,
+) {
+	const s = "Bockhoy.Redis: Failed to execute %s command. "
+
+	var respMaybe interface{}
+	if dest != nil {
+		respMaybe = &radix.Maybe{ Rcv: dest }
+	}
+
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancelFunc context.CancelFunc
+		ctx, cancelFunc = context.WithTimeout(ctx, timeout)
+		defer cancelFunc()
+	}
+
+	var act radix.Action
+	if len(args) > 0 {
+		act = radix.FlatCmd(respMaybe, cmd, args...)
+	} else {
+		act = radix.Cmd(respMaybe, cmd, argsStr...)
+	}
+
+	if legacyErr := p.client.Do(ctx, act); legacyErr != nil {
+		return true, ekaerr.RejectedOperation.Wrap(legacyErr, s, cmd).Throw()
+	}
+
+	isNull = respMaybe != nil &&
+		(respMaybe.(*radix.Maybe).Null || respMaybe.(*radix.Maybe).Empty)
+
+	if nilOrEmptyAsErr && isNull {
+		return true, ekaerr.IllegalState.
+			New(s + "Nil or empty response is returned.", cmd).
+			Throw()
+	}
+
+	return isNull, nil
 }

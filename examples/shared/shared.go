@@ -19,20 +19,18 @@
 package shared
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/qioalice/ekago/v2/ekaerr"
-	"github.com/qioalice/ekago/v2/ekatime"
+	"github.com/qioalice/ekago/v3/ekaerr"
+	"github.com/qioalice/ekago/v3/ekalog"
+	"github.com/qioalice/ekago/v3/ekatime"
 
 	"github.com/qioalice/bokchoy"
 	"github.com/qioalice/bokchoy_redis"
 
-	"github.com/go-redis/redis/v7"
-)
-
-const (
-	DSN = `redis://127.0.0.1:6379/14`
+	"github.com/mediocregopher/radix/v4"
 )
 
 type (
@@ -40,6 +38,13 @@ type (
 		Text      string
 		Timestamp ekatime.Timestamp
 	}
+)
+
+//goland:noinspection GoSnakeCaseUsage
+const (
+	LISTEN_NETWORK = "tcp"
+	LISTEN_ADDR = "127.0.0.1:6379"
+	SELECT_DB = "12"
 )
 
 var (
@@ -51,16 +56,16 @@ func init() {
 
 	fmt.Println()
 
-	redisOptions, legacyErr := redis.ParseURL(DSN)
-	ekaerr.InitializationFailed.
-		Wrap(legacyErr, s+"Incorrect DSN.").
-		AddFields("bokchoy_example_incorrect_dsn", DSN).
-		LogAsFatal(s)
+	c, legacyErr := radix.PoolConfig{Dialer: radix.Dialer{SelectDB: SELECT_DB}}.
+		New(context.Background(), LISTEN_NETWORK, LISTEN_ADDR)
+
+	err := ekaerr.InitializationFailed.Wrap(legacyErr, s).WithString("redis_addr", LISTEN_ADDR)
+	ekalog.Emerge("", err)
 
 	bokchoyRedisBroker, err := bokchoy_redis.NewBroker(
-		bokchoy_redis.WithRedisClient(redis.NewClient(redisOptions)),
+		bokchoy_redis.WithRedisClient(c),
 	)
-	err.LogAsFatal()
+	ekalog.Emerge("", err)
 
 	err = bokchoy.Init(
 		bokchoy.WithBroker(bokchoyRedisBroker),
@@ -71,7 +76,7 @@ func init() {
 			10 * time.Second,
 		}),
 	)
-	err.LogAsFatal(s)
+	ekalog.Emerge("", err)
 
 	TestQueue = bokchoy.GetQueue("test-queue")
 }

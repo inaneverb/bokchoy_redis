@@ -24,7 +24,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/qioalice/ekago/v2/ekatime"
+	"github.com/qioalice/ekago/v3/ekalog"
+	"github.com/qioalice/ekago/v3/ekatime"
 
 	"github.com/qioalice/bokchoy_redis/examples/shared"
 )
@@ -48,7 +49,5 @@ func iter(reader *bufio.Reader) {
 		Text:      text,
 		Timestamp: ekatime.Now(),
 	})
-	if err.IsNotNil() {
-		err.LogAsError(s)
-	}
+	ekalog.Emerge("", err)
 }

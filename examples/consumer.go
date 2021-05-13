@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
-	"github.com/qioalice/ekago/v2/ekaerr"
-	"github.com/qioalice/ekago/v2/ekasys"
+	"github.com/qioalice/ekago/v3/ekaerr"
+	"github.com/qioalice/ekago/v3/ekalog"
+	"github.com/qioalice/ekago/v3/ekasys"
 
 	"github.com/qioalice/bokchoy"
 	"github.com/qioalice/bokchoy_redis/examples/shared"
@@ -52,9 +54,7 @@ func main() {
 	shared.TestQueue.OnComplete(onCompleteCallback)
 	shared.TestQueue.Use(handler)
 
-	if err := bokchoy.Run(); err.IsNotNil() {
-		err.LogAsFatalww(s, nil)
-	}
+	ekalog.Emerge("", bokchoy.Run())
 }
 
 func onStartCallback(task *bokchoy.Task) *ekaerr.Error {
@@ -110,5 +110,8 @@ func handler(task *bokchoy.Task) *ekaerr.Error {
 	spew.Fdump(&b, task.Payload)
 	b.WriteByte('\n')
 	_, _ = ekasys.Stdout().Write(b.Bytes())
+	if strings.ToUpper(task.Payload.(shared.UserDefinedPayloadType).Text) == "ERROR" {
+		return ekaerr.Interrupted.New("Error is requested").Throw()
+	}
 	return nil
 }

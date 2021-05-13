@@ -19,34 +19,43 @@
 package bokchoy_redis
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
-	"github.com/qioalice/ekago/v2/ekaerr"
-	"github.com/qioalice/ekago/v2/ekalog"
-	"github.com/qioalice/ekago/v2/ekaunsafe"
+	"github.com/qioalice/ekago/v3/ekaerr"
+	"github.com/qioalice/ekago/v3/ekalog"
+	"github.com/qioalice/ekago/v3/ekaunsafe"
 
 	"github.com/qioalice/bokchoy"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/mediocregopher/radix/v4"
 )
 
 //goland:noinspection SpellCheckingInspection
 type (
-	// RedisBroker is the redis broker.
+	// RedisBroker is the broker for Bokchoy that is used Redis as a backend.
+	//
+	// It uses Redis' zset to store metadata of tasks (an order of tasks per queue),
+	// where rank is unix timestamp of data when task must be processed.
+	// Also Redis' key-value pair is used, when key is a queue name + task's ID (ULID)
+	// and value is msgpack'ed task's payload.
+	// A user's payload can be encoded any way user wants. Typically it's JSON.
+	//
+	// WARNING!
+	// YOUR REDIS SERVER'S VERSION MUST BE 6.2.0 OR GREATER!
 	RedisBroker struct {
 
 		// --- Main parts ---
 
-		client     redis.UniversalClient
+		client radix.Client
 		clientInfo string
 
 		// --- Additional parts ---
 
-		logger       *ekalog.Logger
+		logger *ekalog.Logger
+
 		tickInterval time.Duration
 
 		// --- Info about consuming delayed queues ---
@@ -67,6 +76,12 @@ type (
 	}
 )
 
+//goland:noinspection GoSnakeCaseUsage
+const (
+	// CTX_TIMEOUT_DEFAULT is a timeout that is provided for Redis command to be executed.
+	CTX_TIMEOUT_DEFAULT = 5 * time.Second
+)
+
 // NewBroker creates, initializes and returns a new RedisBroker instance.
 // It uses a passed Option s to determine its behaviour.
 //
@@ -74,10 +89,7 @@ type (
 //
 //  - WithRedisClient():
 //    You need to specify Redis client, what will be used as backend.
-//
-//    Allowed types: redis.Client, redis.ClusterClient, redis.Ring.
-//    Be carefully with redis.ClusterClient and redis.Ring.
-//    It's not tested properly yet.
+//    Keep in mind, your Redis server's version must be 6.2.0 or greater.
 //
 func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 	const s = "Bokchoy.RedisBroker: Failed to create a new Broker. "
@@ -103,129 +115,136 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 	}
 
 	br := &RedisBroker{
-		client:       optionsObject.Client,
-		logger:       ekalog.With(),
-		tickInterval: optionsObject.TickInterval,
-		qcd:          make(map[string]struct{}),
-		mu:           &sync.Mutex{},
+		client:          optionsObject.Client,
+		logger:          ekalog.Copy(),
+		tickInterval:    time.Second,
+		qcd:             make(map[string]struct{}),
+		mu:              &sync.Mutex{},
 	}
 
-	// Go to options and extract address.
-	// C-style magic.
-	// Let's gonna be dirty!
-	//
-	// So, each Redis' client contains its private part by pointer,
-	// which contains its options by pointer, like:
-	//
-	//    type SomeRedisClient struct {
-	//        *someRedisClientPrivate
-	//        ...
-	//    }
-	//    type someRedisClientPrivate struct {
-	//        *someRedisClientPrivateOptions
-	//        ...
-	//    }
-	//    type someRedisClientPrivateOptions struct {
-	//        < that's what we need >
-	//    }
-	//
-	// So, it's not hard.
-	fn := func(ptr unsafe.Pointer, typ int) string {
-		// ptr is either *redis.Client, *redis.ClusterClient or *redis.Ring
-		// we have to dereference it, and then we'll receive a pointer
-		// to the either *redis.baseClient, *redis.clusterClient or *redis.ring
-		doublePtr := (*unsafe.Pointer)(ptr)
-		ptr = *doublePtr
-		// once more to get options
-		doublePtr = (*unsafe.Pointer)(ptr)
-		ptr = *doublePtr
-		// and that's it
-
-		switch typ {
-		case 1:
-			options := (*redis.Options)(ptr)
-			return fmt.Sprintf("Redis client, [%s], %d DB",
-				options.Addr, options.DB)
-
-		case 2:
-			options := (*redis.ClusterOptions)(ptr)
-			return fmt.Sprintf("Redis cluster, [%s]",
-				strings.Join(options.Addrs, ", "))
-
-		case 3:
-			options := (*redis.RingOptions)(ptr)
-			addresses := make([]string, 0, len(options.Addrs))
-			for _, addr := range options.Addrs {
-				addresses = append(addresses, addr)
-			}
-			return fmt.Sprintf("Redis ring, [%s], %d DB",
-				strings.Join(addresses, ", "), options.DB)
-
-		default:
-			return "<Unknown Redis client>"
-		}
+	if optionsObject.TickInterval > time.Second {
+		br.tickInterval = optionsObject.TickInterval
 	}
 
-	br.clientInfo = "<Incorrect Redis client>"
-	switch client := optionsObject.Client.(type) {
-
-	case *redis.Client:
-		br.clientInfo = fn(unsafe.Pointer(client), 1)
-
-	case *redis.ClusterClient:
-		br.clientInfo = fn(unsafe.Pointer(client), 2)
-
-	case *redis.Ring:
-		br.clientInfo = fn(unsafe.Pointer(client), 3)
-	}
-
-	// User can "disable" logging passing nil or invalid logger.
-	// Thus there is no either nil check nor logger.IsValid() call.
-	if optionsObject.loggerIsPresented {
+	if optionsObject.Logger != nil {
 		br.logger = optionsObject.Logger
 	}
+	
+	// Get an info about Redis' server and current client.
+	// First of call, check Redis version using INFO command.
 
-	if err = br.Ping(); err.IsNotNil() {
-		return nil, err.
-			AddMessage(s).
+	kvSplit := func(s string, sep byte) (key, value string) {
+		idx := strings.IndexByte(s, sep)
+		if idx == -1 {
+			idx = 0
+		}
+		return s[:idx], s[idx+1:]
+	}
+
+	var respStrRaw string
+
+	// --- Redis server ver 6.2.0 or greater CHECK --- //
+
+	if _, err = br.execCmd("INFO", &respStrRaw, CTX_TIMEOUT_DEFAULT, true); err.IsNotNil() {
+		return nil, err.ReplaceClass(ekaerr.InitializationFailed).AddMessage(s).Throw()
+	}
+
+	respLines := strings.Split(respStrRaw, "\n")
+	if len(respLines) < 2 {
+		return nil, ekaerr.InitializationFailed.
+			New(s + "INFO command returns strange response. Do you use Redis <= 2.4 version?").
 			Throw()
 	}
 
-	// Ping is OK, we can load scripts.
+	redisVersionKey, redisVersion := kvSplit(respLines[1], ':')
+	redisVersion = strings.TrimSpace(redisVersion)
+	if redisVersionKey != "redis_version" || redisVersion == "" {
+		return nil, ekaerr.InitializationFailed.
+			New(s + "INFO command contains strange 2nd line of Server information. Do you use Redis <= 2.4 version?").
+			WithString("bokchoy_redis_server_version", respLines[1]).
+			Throw()
+	}
+
+	redisVersionParts := strings.Split(redisVersion, ".")
+	rvMajor := redisVersionParts[0] // checks above guarantees that at least 1 elem will be presented
+	rvMinor := "0"
+
+	if len(redisVersionParts) > 1 {
+		rvMinor = redisVersionParts[1]
+	}
+
+	rvMajorInt, legacyErr := strconv.Atoi(rvMajor)
+	if legacyErr != nil {
+		return nil, ekaerr.InitializationFailed.
+			Wrap(legacyErr, s + "After INFO command failed to parse Server major version.").
+			WithString("bokchoy_redis_server_major_version", rvMajor).
+			Throw()
+	}
+	rvMinorInt, legacyErr := strconv.Atoi(rvMinor)
+	if legacyErr != nil {
+		return nil, ekaerr.InitializationFailed.
+			Wrap(legacyErr, s + "After INFO command failed to parse Server minor version.").
+			WithString("bokchoy_redis_server_minor_version", rvMinor).
+			Throw()
+	}
+
+	if rvMajorInt < 6 || (rvMajorInt == 6 && rvMinorInt < 2) {
+		return nil, ekaerr.InitializationFailed.
+			New(s + "Redis server must be version 6.2.0 or greater.").
+			WithString("bokchoy_redis_server_version", redisVersion).
+			Throw()
+	}
+
+	// --- Redis server ver 6.2.0 or greater CONFIRMED --- //
+
+	br.clientInfo = "Redis " + redisVersion
+
+	// --- Redis server and client data REQUESTING --- //
+
+	if _, err = br.execCmd("CLIENT", &respStrRaw, CTX_TIMEOUT_DEFAULT, true, "INFO"); err.IsNil() {
+		var (
+			db = "?"
+			addr = "?"
+		)
+		for _, part := range strings.Split(respStrRaw, " ") {
+			switch k, v := kvSplit(part, '='); {
+			case k == "db" && v != "": db = v
+			case k == "addr" && v != "" && addr == "?": addr = v
+			case k == "laddr" && v != "": addr = v
+			}
+		}
+		br.clientInfo += ": " + addr + "/" + db
+	}
+
+	// --- Redis server and client data RETRIEVED. --- //
+
+	// --- Redis registering custom Lua scripts START. --- //
+
 	//goland:noinspection SpellCheckingInspection
 	for _, script := range []struct {
 		name string
 		data string
 		dest *string
 	}{
-		{name: "KEYSREM", data: _RS_KEYSREM, dest: &br._KEYSREM},
-		{name: "QDPOPTASKS", data: _RS_QDPOPTASKS, dest: &br._QDPOPTASKS},
-		{name: "QDUPTASKS", data: _RS_QDUPTASKS, dest: &br._QDUPTASKS},
-		{name: "QSTAT", data: _RS_QSTAT, dest: &br._QSTAT},
-		{name: "QRPUSHTASK", data: _RS_QRPUSHTASK, dest: &br._QRPUSHTASK},
-		{name: "QLPUSHTASK", data: _RS_QLPUSHTASK, dest: &br._QLPUSHTASK},
-		{name: "QDPUSHTASK", data: _RS_QDPUSHTASK, dest: &br._QDPUSHTASK},
+		{ name: "KEYSREM",    data: _RS_KEYSREM,    dest: &br._KEYSREM    },
+		{ name: "QDPOPTASKS", data: _RS_QDPOPTASKS, dest: &br._QDPOPTASKS },
+		{ name: "QDUPTASKS",  data: _RS_QDUPTASKS,  dest: &br._QDUPTASKS  },
+		{ name: "QSTAT",      data: _RS_QSTAT,      dest: &br._QSTAT      },
+		{ name: "QRPUSHTASK", data: _RS_QRPUSHTASK, dest: &br._QRPUSHTASK },
+		{ name: "QLPUSHTASK", data: _RS_QLPUSHTASK, dest: &br._QLPUSHTASK },
+		{ name: "QDPUSHTASK", data: _RS_QDPUSHTASK, dest: &br._QDPUSHTASK },
 	} {
-		switch sha1, legacyErr :=
-			br.client.ScriptLoad(script.data).Result(); {
-
-		case legacyErr != nil && legacyErr != redis.Nil:
-			return nil, ekaerr.InitializationFailed.
-				Wrap(legacyErr, s+"Failed to load Redus Lua script.").
-				AddFields("bokchoy_redis_script", script.name).
+		if _, err = br.execCmd("SCRIPT", &respStrRaw, CTX_TIMEOUT_DEFAULT, true, "LOAD", script.data); err.IsNotNil() {
+			return nil, err.ReplaceClass(ekaerr.InitializationFailed).
+				AddMessage(s).
+				WithString("bokchoy_redis_server_version", redisVersion).
+				WithString("bokchoy_redis_script_name", script.name).
 				Throw()
-
-		case sha1 == "":
-			return nil, ekaerr.InitializationFailed.
-				New(s+"Failed to load Redis Lua script. "+
-					"Returned SHA1 is unexpectedly empty.").
-				AddFields("bokchoy_redis_script", script.name).
-				Throw()
-
-		default:
-			*script.dest = sha1
 		}
+		*script.dest = respStrRaw
 	}
+
+	// --- Redis registering custom Lua scripts COMPLETED. --- //
 
 	return br, nil
 }
@@ -256,11 +275,8 @@ func (p *RedisBroker) Ping() *ekaerr.Error {
 			Throw()
 	}
 
-	if legacyErr := p.client.Ping().Err(); legacyErr != nil {
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields("bokchoy_broker", p.clientInfo).
-			Throw()
+	if _, err := p.execCmd("PING", nil, CTX_TIMEOUT_DEFAULT, false); err.IsNotNil() {
+		return err.AddMessage(s).WithString("bokchoy_broker", p.clientInfo).Throw()
 	}
 
 	return nil
@@ -290,71 +306,48 @@ func (p *RedisBroker) Consume(queueName string, etaUnixNano int64) ([][]byte, *e
 	var (
 		result           []string
 		queueKey         = buildKey1(queueName)
-		queueKey2        = []string{queueKey}
 		maxTTL           = time.Now().UnixNano()
-		legacyErr        error
-		usedRedisCommand string
+		err              *ekaerr.Error
+		encodedTasks     [][]byte
 		addLogMessage    string
 	)
 
 	if etaUnixNano == 0 {
-		legacyErr = p.client.EvalSha(p._QDUPTASKS, queueKey2, maxTTL).Err()
-		usedRedisCommand = "QDUPTASKS"
-		addLogMessage = "Failed to try to up delayed tasks."
-		if legacyErr == nil || legacyErr == redis.Nil {
-			result, legacyErr = p.client.BLPop(p.tickInterval, queueKey).Result()
-			usedRedisCommand = "BLPOP"
+		if _, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, false, p._QDUPTASKS, "1", queueKey, maxTTL); err.IsNotNil() {
+			addLogMessage = "Failed to try to up delayed tasks."
+
+		} else if _, err = p.execFlatCmd("BLPOP", &result, p.tickInterval + CTX_TIMEOUT_DEFAULT, false, queueKey, p.tickInterval.Seconds()); err.IsNotNil() {
 			addLogMessage = "Failed to retrieve ready-to-consumed tasks."
 		}
 	} else {
-		var result_ interface{}
-		result_, legacyErr = p.client.EvalSha(p._QDPOPTASKS, queueKey2, maxTTL).Result()
-		usedRedisCommand = "QDPOPTASKS"
-		addLogMessage = "Failed to retrieve delayed up-to tasks."
-		if legacyErr == nil {
-			result = result_.([]string)
+		if _, err = p.execFlatCmd("EVALSHA", &result, CTX_TIMEOUT_DEFAULT, false, p._QDPOPTASKS, "1", queueKey, maxTTL); err.IsNotNil() {
+			addLogMessage = "Failed to retrieve delayed up-to tasks."
 		}
 	}
 
 	if etaUnixNano == 0 && len(result) > 0 {
 		// Means BLPOP was used.
-		// It always returns a queue (list name) as 1st return arg.
-		// Ignore it.
+		// It always returns a queue (list name) as 1st return arg. Ignore it.
 		result = result[1:]
 	}
 
-	if legacyErr != nil && legacyErr != redis.Nil {
-		return nil, ekaerr.ExternalError.
-			Wrap(legacyErr, s+addLogMessage).
-			AddFields(
-				"bokchoy_queue_key", queueKey,
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", usedRedisCommand).
-			Throw()
+	if err.IsNil() {
+		if len(result) == 0 {
+			return nil, nil
+		}
+
+		taskKeys := make([]string, 0, len(result))
+		for _, taskID := range result {
+			taskKeys = append(taskKeys, buildKey2(queueName, taskID))
+		}
+
+		encodedTasks, err = p.getMany(taskKeys)
 	}
 
-	if len(result) == 0 {
-		return nil, nil
-	}
-
-	taskKeys := make([]string, 0, len(result))
-	for _, taskID := range result {
-		taskKeys = append(taskKeys, buildKey2(queueName, taskID))
-	}
-
-	var (
-		encodedTasks [][]byte
-		err          *ekaerr.Error
-	)
-
-	switch encodedTasks, err = p.getMany(taskKeys); {
-
-	case err.IsNotNil():
-		return nil, err.
-			AddMessage(s).
-			AddFields(
-				"bokchoy_queue_key", queueKey,
-				"bokchoy_queue_name", queueName).
+	if err.IsNotNil() {
+		return nil, err.AddMessage(s + addLogMessage).
+			WithString("bokchoy_queue_key", queueKey).
+			WithString("bokchoy_queue_name", queueName).
 			Throw()
 	}
 
@@ -378,24 +371,17 @@ func (p *RedisBroker) Get(queueName, taskID string) ([]byte, *ekaerr.Error) {
 			Throw()
 	}
 
-	switch rawData, legacyErr :=
-		p.client.Get(buildKey2(queueName, taskID)).Bytes(); {
-
-	case legacyErr == redis.Nil:
-		return nil, nil
-
-	case legacyErr != nil:
-		return nil, ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_queue_name", queueName,
-				"bokchoy_task_id", taskID,
-				"bokchoy_error_redis_command", "GET").
+	var resp []byte
+	key := buildKey2(queueName, taskID)
+	if _, err := p.execCmd("GET", &resp, CTX_TIMEOUT_DEFAULT, false, key); err.IsNotNil() {
+		return nil, err.
+			AddMessage(s).
+			WithString("bokchoy_queue_name", queueName).
+			WithString("bokchoy_task_id", taskID).
 			Throw()
-
-	default:
-		return rawData, nil
 	}
+
+	return resp, nil
 }
 
 // Delete deletes a bokchoy.Task from its queue by bokchoy.Task's ID.
@@ -422,19 +408,11 @@ func (p *RedisBroker) Delete(queueName, taskID string) *ekaerr.Error {
 			Throw()
 	}
 
-	switch legacyErr :=
-		p.client.Unlink(buildKey2(queueName, taskID)).Err(); {
-
-	case legacyErr == redis.Nil:
-		return nil
-
-	case legacyErr != nil:
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_queue_name", queueName,
-				"bokchoy_task_id", taskID,
-				"bokchoy_error_redis_command", "UNLINK").
+	if _, err := p.execCmd("UNLINK", nil, CTX_TIMEOUT_DEFAULT, false); err.IsNotNil() {
+		return err.
+			AddMessage(s).
+			WithString("bokchoy_queue_name", queueName).
+			WithString("bokchoy_task_id", taskID).
 			Throw()
 	}
 
@@ -472,42 +450,18 @@ func (p *RedisBroker) List(queueName string) ([][]byte, *ekaerr.Error) {
 			Throw()
 	}
 
-	var (
-		taskIDs []string
-	)
-
-	switch taskIDs_, legacyErr :=
-		p.client.LRange(queueName, 0, -1).Result(); {
-
-	case legacyErr == redis.Nil:
-		return nil, nil
-
-	case legacyErr != nil:
-		return nil, ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", "LRANGE").
-			Throw()
-
-	default:
-		taskIDs = taskIDs_
+	var taskIDs []string
+	if _, err := p.execCmd("LRANGE", &taskIDs, CTX_TIMEOUT_DEFAULT, false, "0", "-1"); err.IsNotNil() {
+		return nil, err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
 	}
 
 	for i, n := 0, len(taskIDs); i < n; i++ {
 		taskIDs[i] = buildKey2(queueName, taskIDs[i])
 	}
 
-	switch rawData, err :=
-		p.getMany(taskIDs); {
-
-	case err.IsNotNil():
-		return nil, err.
-			AddMessage(s).
-			AddFields("bokchoy_queue_name", queueName).
-			Throw()
-
-	default:
+	if rawData, err := p.getMany(taskIDs); err.IsNotNil() {
+		return nil, err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
+	} else {
 		return rawData, nil
 	}
 }
@@ -533,50 +487,42 @@ func (p *RedisBroker) Count(queueName string) (bokchoy.BrokerStats, *ekaerr.Erro
 	}
 
 	var (
+		rawResp []string
 		stats bokchoy.BrokerStats
-		err   *ekaerr.Error
 	)
 
-	switch res, legacyErr :=
-		p.client.EvalSha(p._QSTAT, []string{buildKey1(queueName)}).Result(); {
-
-	case legacyErr != nil:
-		err = ekaerr.ExternalError.
-			Wrap(legacyErr, s)
-
-	default:
-		// These errors below about bug.
-		// They must NEVER (absolutely) happen, till you using valid Redis server,
-		// and till Redis QSTAT Lua script is OK.
-		//
-		// If you catch any of these error, look at:
-		//  - Redis server (including version),
-		//  - go-redis ( https://github.com/go-redis/redis ) (including version),
-		//  - Lua script.
-		switch res, ok := res.([]int64); {
-
-		case !ok:
-			err = ekaerr.InternalError.
-				New(s + "QSTAT returned value with not [2]int64 type. Bug?")
-
-		case len(res) != 2:
-			err = ekaerr.InternalError.
-				New(s + "QSTAT returns []int64 with length != 2. Bug?")
-
-		default:
-			stats.Direct = int(res[0])
-			stats.Delayed = int(res[1])
-		}
+	key := buildKey1(queueName)
+	if _, err := p.execCmd("EVALSHA", &rawResp, CTX_TIMEOUT_DEFAULT, true, p._QSTAT, key); err.IsNotNil() {
+		return stats, err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
 	}
 
-	//goland:noinspection GoNilness
-	switch {
+	// These errors below about bug.
+	// They must NEVER (absolutely) happen, till you using valid Redis server,
+	// and till Redis QSTAT Lua script is OK.
+	//
+	// If you catch any of these error, look at:
+	//  - Redis server (including version),
+	//  - radix ( https://github.com/mediocregopher/radix ) (including version),
+	//  - Lua script.
 
-	case err.IsNotNil():
-		return bokchoy.BrokerStats{}, err.
-			AddFields(
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", "QSTAT").
+	if len(rawResp) != 2 {
+		return stats, ekaerr.InternalError.
+			New(s + "QSTAT returns response with length != 2. Bug?").
+			WithString("bokchoy_queue_name", queueName).
+			Throw()
+	}
+
+	var legacyErr error
+	if stats.Direct, legacyErr = strconv.Atoi(rawResp[0]); legacyErr != nil {
+		return stats, ekaerr.InternalError.
+			New(s + "QSTAT returns response and 1st argument is not integer. Bug?").
+			WithString("bokchoy_queue_name", queueName).
+			Throw()
+	}
+	if stats.Delayed, legacyErr = strconv.Atoi(rawResp[1]); legacyErr != nil {
+		return stats, ekaerr.InternalError.
+			New(s + "QSTAT returns response and 2nd argument is not integer. Bug?").
+			WithString("bokchoy_queue_name", queueName).
 			Throw()
 	}
 
@@ -601,16 +547,20 @@ func (p *RedisBroker) Set(queueName, taskID string, data []byte, ttl time.Durati
 			Throw()
 	}
 
-	switch legacyErr :=
-		p.client.Set(buildKey2(queueName, taskID), data, ttl).Err(); {
+	var err *ekaerr.Error
+	key := buildKey2(queueName, taskID)
 
-	case legacyErr != nil:
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_queue_name", queueName,
-				"bokchoy_task_id", taskID,
-				"bokchoy_error_redis_command", "SET").
+	if ttl > time.Second {
+		_, err = p.execFlatCmd("SETEX", nil, CTX_TIMEOUT_DEFAULT, true, key, ttl.Seconds(), data)
+	} else {
+		_, err = p.execFlatCmd("SET", nil, CTX_TIMEOUT_DEFAULT, true, key, data)
+	}
+
+	if err.IsNotNil() {
+		return err.
+			AddMessage(s).
+			WithString("bokchoy_queue_name", queueName).
+			WithString("bokchoy_task_id", taskID).
 			Throw()
 	}
 
@@ -644,37 +594,28 @@ func (p *RedisBroker) Publish(queueName, taskID string, data []byte, eta int64) 
 			Throw()
 	}
 
-	var (
-		legacyErr        error
-		usedRedisCommand string
-		queueKey         = []string{buildKey1(queueName)}
-	)
+	var err *ekaerr.Error
+	key := buildKey1(queueName)
 
-	//goland:noinspection GoNilness
 	switch now := time.Now().UnixNano(); {
 
 	case eta == 0:
-		legacyErr = p.client.EvalSha(p._QRPUSHTASK, queueKey, taskID, data).Err()
-		usedRedisCommand = "QRPUSHTASK"
+		_, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._QRPUSHTASK, "1", key, taskID, data)
 
 	case eta <= now:
-		// ETA is before now, we should push this task in priority
-		legacyErr = p.client.EvalSha(p._QLPUSHTASK, queueKey, taskID, data).Err()
-		usedRedisCommand = "QLPUSHTASK"
+		_, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._QLPUSHTASK, "1", key, taskID, data)
 
 	case eta > now:
 		// ETA is after now, delay the task
-		legacyErr = p.client.EvalSha(p._QDPUSHTASK, queueKey, taskID, eta, data).Err()
-		usedRedisCommand = "QDPUSHTASK"
+		_, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._QDPUSHTASK, "1", key, taskID, eta, data)
 	}
 
-	if legacyErr != nil {
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_task_id", taskID,
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", usedRedisCommand).
+	//goland:noinspection GoNilness
+	if err.IsNotNil() {
+		return err.
+			AddMessage(s).
+			WithString("bokchoy_queue_name", queueName).
+			WithString("bokchoy_task_id", taskID).
 			Throw()
 	}
 
@@ -716,21 +657,9 @@ func (p *RedisBroker) Empty(queueName string) *ekaerr.Error {
 			Throw()
 	}
 
-	var (
-		legacyErr error
-		queueKey  = []string{buildKey1(queueName + "*")}
-	)
-
-	switch legacyErr =
-		p.client.EvalSha(p._KEYSREM, nil, queueKey).Err(); {
-
-	case legacyErr != nil:
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_queue_name", queueName,
-				"bokchoy_error_redis_command", "KEYSREM").
-			Throw()
+	key := buildKey1(queueName + "*")
+	if _, err := p.execCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._KEYSREM, "1", key); err.IsNotNil() {
+		return err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
 	}
 
 	return nil
@@ -761,20 +690,9 @@ func (p *RedisBroker) ClearAll() *ekaerr.Error {
 			Throw()
 	}
 
-	var (
-		legacyErr error
-		queueKey  = []string{buildKey1("*")}
-	)
-
-	switch legacyErr =
-		p.client.EvalSha(p._KEYSREM, nil, queueKey).Err(); {
-
-	case legacyErr != nil:
-		return ekaerr.ExternalError.
-			Wrap(legacyErr, s).
-			AddFields(
-				"bokchoy_error_redis_command", "KEYSREM").
-			Throw()
+	key := buildKey1("*")
+	if _, err := p.execCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._KEYSREM, "1", key); err.IsNotNil() {
+		return err.AddMessage(s).Throw()
 	}
 
 	return nil

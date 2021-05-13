@@ -20,9 +20,9 @@ package bokchoy_redis
 import (
 	"time"
 
-	"github.com/qioalice/ekago/v2/ekalog"
+	"github.com/qioalice/ekago/v3/ekalog"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/mediocregopher/radix/v4"
 )
 
 type (
@@ -31,13 +31,11 @@ type (
 
 		// --- Required options ---
 
-		Client redis.UniversalClient
+		Client radix.Client
 
 		// --- Additional options ---
 
-		Logger            *ekalog.Logger
-		loggerIsPresented bool
-
+		Logger *ekalog.Logger
 		TickInterval time.Duration
 	}
 )
