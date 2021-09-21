@@ -45,9 +45,13 @@ func iter(reader *bufio.Reader) {
 	text = strings.TrimSpace(text)
 	fmt.Println()
 
+	if text == "" {
+		return
+	}
+
 	_, err := shared.TestQueue.Publish(shared.UserDefinedPayloadType{
 		Text:      text,
-		Timestamp: ekatime.Now(),
+		Timestamp: ekatime.NewTimestampNow(),
 	})
 	ekalog.Emerge("", err)
 }

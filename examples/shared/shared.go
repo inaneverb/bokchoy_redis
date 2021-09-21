@@ -43,8 +43,8 @@ type (
 //goland:noinspection GoSnakeCaseUsage
 const (
 	LISTEN_NETWORK = "tcp"
-	LISTEN_ADDR = "127.0.0.1:6379"
-	SELECT_DB = "12"
+	LISTEN_ADDR    = "127.0.0.1:6379"
+	SELECT_DB      = "12"
 )
 
 var (
