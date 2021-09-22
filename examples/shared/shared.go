@@ -12,7 +12,7 @@
 //
 //     Copyright © 2020. All rights reserved.
 //     Author: Ilya Stroy.
-//     Contacts: qioalice@gmail.com, https://github.com/qioalice
+//     Contacts: iyuryevich@pm.me, https://github.com/qioalice
 //     License: https://opensource.org/licenses/MIT
 //
 
@@ -59,7 +59,8 @@ func init() {
 	c, legacyErr := radix.PoolConfig{Dialer: radix.Dialer{SelectDB: SELECT_DB}}.
 		New(context.Background(), LISTEN_NETWORK, LISTEN_ADDR)
 
-	err := ekaerr.InitializationFailed.Wrap(legacyErr, s).WithString("redis_addr", LISTEN_ADDR)
+	err := ekaerr.InitializationFailed.Wrap(legacyErr, s).
+		WithString("redis_addr", LISTEN_ADDR)
 	ekalog.Emerge("", err)
 
 	bokchoyRedisBroker, err := bokchoy_redis.NewBroker(

@@ -12,7 +12,7 @@
 //
 //     Copyright © 2020. All rights reserved.
 //     Author: Ilya Stroy.
-//     Contacts: qioalice@gmail.com, https://github.com/qioalice
+//     Contacts: iyuryevich@pm.me, https://github.com/qioalice
 //     License: https://opensource.org/licenses/MIT
 //
 
@@ -130,7 +130,7 @@ func (p *RedisBroker) isValid() bool {
 // getMany tries to retrieve an encoded RAW data of bokchoy.Task s,
 // the key of which are passed.
 func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
-	const s = "Bokchoy.RedisBroker: Failed to get many tasks by its keys. "
+	const s = "Bokchoy.RedisBroker: Failed to get many tasks by its keys."
 
 	var rawResp []string
 	if _, err := p.execCmd("MGET", &rawResp, CTX_TIMEOUT_DEFAULT, false, taskKeys...); err.IsNotNil() {
@@ -152,50 +152,49 @@ func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
 }
 
 func (p *RedisBroker) execCmd(
-	cmd               string,
-	dest              interface{},
-	timeout           time.Duration,
-	nilOrEmptyAsErr   bool,
-	args              ...string,
+	cmd string,
+	dest interface{},
+	timeout time.Duration,
+	nilOrEmptyAsErr bool,
+	args ...string,
 ) (
-	isNull            bool,
-	err               *ekaerr.Error,
+	isNull bool,
+	err *ekaerr.Error,
 ) {
 	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, args, nil)
 	return isNull, err.Throw()
 }
 
 func (p *RedisBroker) execFlatCmd(
-	cmd               string,
-	dest              interface{},
-	timeout           time.Duration,
-	nilOrEmptyAsErr   bool,
-	args              ...interface{},
+	cmd string,
+	dest interface{},
+	timeout time.Duration,
+	nilOrEmptyAsErr bool,
+	args ...interface{},
 ) (
-	isNull            bool,
-	err               *ekaerr.Error,
+	isNull bool,
+	err *ekaerr.Error,
 ) {
 	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, nil, args)
 	return isNull, err.Throw()
 }
 
-
 func (p *RedisBroker) do(
-	cmd               string,
-	dest              interface{},
-	timeout           time.Duration,
-	nilOrEmptyAsErr   bool,
-	argsStr           []string,
-	args              []interface{},
+	cmd string,
+	dest interface{},
+	timeout time.Duration,
+	nilOrEmptyAsErr bool,
+	argsStr []string,
+	args []interface{},
 ) (
-	isNull            bool,
-	err               *ekaerr.Error,
+	isNull bool,
+	err *ekaerr.Error,
 ) {
-	const s = "Bockhoy.Redis: Failed to execute %s command. "
+	const s = "Bockhoy.Redis: Failed to execute %s command."
 
 	var respMaybe interface{}
 	if dest != nil {
-		respMaybe = &radix.Maybe{ Rcv: dest }
+		respMaybe = &radix.Maybe{Rcv: dest}
 	}
 
 	ctx := context.Background()
@@ -220,8 +219,8 @@ func (p *RedisBroker) do(
 		(respMaybe.(*radix.Maybe).Null || respMaybe.(*radix.Maybe).Empty)
 
 	if nilOrEmptyAsErr && isNull {
-		return true, ekaerr.IllegalState.
-			New(s + "Nil or empty response is returned.", cmd).
+		return true, ekaerr.IllegalState.New(s, cmd).
+			WithString("description", "Nil or empty response is returned.").
 			Throw()
 	}
 

@@ -12,7 +12,7 @@
 //
 //     Copyright © 2020. All rights reserved.
 //     Author: Ilya Stroy.
-//     Contacts: qioalice@gmail.com, https://github.com/qioalice
+//     Contacts: iyuryevich@pm.me, https://github.com/qioalice
 //     License: https://opensource.org/licenses/MIT
 //
 
@@ -49,7 +49,7 @@ type (
 
 		// --- Main parts ---
 
-		client radix.Client
+		client     radix.Client
 		clientInfo string
 
 		// --- Additional parts ---
@@ -92,7 +92,7 @@ const (
 //    Keep in mind, your Redis server's version must be 6.2.0 or greater.
 //
 func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
-	const s = "Bokchoy.RedisBroker: Failed to create a new Broker. "
+	const s = "Bokchoy.RedisBroker: Failed to create a new Broker."
 
 	defaultOptionsCopy := *defaultOptions
 	optionsObject := &defaultOptionsCopy
@@ -108,18 +108,19 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 	switch {
 
 	case ekaunsafe.TakeRealAddr(optionsObject.Client) == nil:
-		return nil, ekaerr.InitializationFailed.
-			New(s + "Redis client must be presented. " +
-				"Use WithRedisClient() option as a part of constructor argument.").
+		return nil, ekaerr.InitializationFailed.New(s).
+			WithString("description",
+				"Redis client must be presented. "+
+					"Use WithRedisClient() option as a part of constructor argument.").
 			Throw()
 	}
 
 	br := &RedisBroker{
-		client:          optionsObject.Client,
-		logger:          ekalog.Copy(),
-		tickInterval:    time.Second,
-		qcd:             make(map[string]struct{}),
-		mu:              &sync.Mutex{},
+		client:       optionsObject.Client,
+		logger:       ekalog.Copy(),
+		tickInterval: time.Second,
+		qcd:          make(map[string]struct{}),
+		mu:           &sync.Mutex{},
 	}
 
 	if optionsObject.TickInterval > time.Second {
@@ -129,7 +130,7 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 	if optionsObject.Logger != nil {
 		br.logger = optionsObject.Logger
 	}
-	
+
 	// Get an info about Redis' server and current client.
 	// First of call, check Redis version using INFO command.
 
@@ -151,22 +152,27 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 
 	respLines := strings.Split(respStrRaw, "\n")
 	if len(respLines) < 2 {
-		return nil, ekaerr.InitializationFailed.
-			New(s + "INFO command returns strange response. Do you use Redis <= 2.4 version?").
+		return nil, ekaerr.InitializationFailed.New(s).
+			WithString("description",
+				"INFO command returns strange response. "+
+					"Do you use Redis <= 2.4 version?").
 			Throw()
 	}
 
 	redisVersionKey, redisVersion := kvSplit(respLines[1], ':')
 	redisVersion = strings.TrimSpace(redisVersion)
 	if redisVersionKey != "redis_version" || redisVersion == "" {
-		return nil, ekaerr.InitializationFailed.
-			New(s + "INFO command contains strange 2nd line of Server information. Do you use Redis <= 2.4 version?").
+		return nil, ekaerr.InitializationFailed.New(s).
+			WithString("description",
+				"INFO command contains strange 2nd line of Server information. "+
+					"Do you use Redis <= 2.4 version?").
 			WithString("bokchoy_redis_server_version", respLines[1]).
 			Throw()
 	}
 
 	redisVersionParts := strings.Split(redisVersion, ".")
-	rvMajor := redisVersionParts[0] // checks above guarantees that at least 1 elem will be presented
+	// checks above guarantees that at least 1 elem will be presented
+	rvMajor := redisVersionParts[0]
 	rvMinor := "0"
 
 	if len(redisVersionParts) > 1 {
@@ -175,22 +181,24 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 
 	rvMajorInt, legacyErr := strconv.Atoi(rvMajor)
 	if legacyErr != nil {
-		return nil, ekaerr.InitializationFailed.
-			Wrap(legacyErr, s + "After INFO command failed to parse Server major version.").
+		return nil, ekaerr.InitializationFailed.Wrap(legacyErr, s).
+			WithString("description",
+				"After INFO command failed to parse Server major version.").
 			WithString("bokchoy_redis_server_major_version", rvMajor).
 			Throw()
 	}
 	rvMinorInt, legacyErr := strconv.Atoi(rvMinor)
 	if legacyErr != nil {
-		return nil, ekaerr.InitializationFailed.
-			Wrap(legacyErr, s + "After INFO command failed to parse Server minor version.").
+		return nil, ekaerr.InitializationFailed.Wrap(legacyErr, s).
+			WithString("description",
+				"After INFO command failed to parse Server minor version.").
 			WithString("bokchoy_redis_server_minor_version", rvMinor).
 			Throw()
 	}
 
 	if rvMajorInt < 6 || (rvMajorInt == 6 && rvMinorInt < 2) {
-		return nil, ekaerr.InitializationFailed.
-			New(s + "Redis server must be version 6.2.0 or greater.").
+		return nil, ekaerr.InitializationFailed.New(s).
+			WithString("description", "Redis server must be version 6.2.0 or greater.").
 			WithString("bokchoy_redis_server_version", redisVersion).
 			Throw()
 	}
@@ -203,14 +211,17 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 
 	if _, err = br.execCmd("CLIENT", &respStrRaw, CTX_TIMEOUT_DEFAULT, true, "INFO"); err.IsNil() {
 		var (
-			db = "?"
+			db   = "?"
 			addr = "?"
 		)
 		for _, part := range strings.Split(respStrRaw, " ") {
 			switch k, v := kvSplit(part, '='); {
-			case k == "db" && v != "": db = v
-			case k == "addr" && v != "" && addr == "?": addr = v
-			case k == "laddr" && v != "": addr = v
+			case k == "db" && v != "":
+				db = v
+			case k == "addr" && v != "" && addr == "?":
+				addr = v
+			case k == "laddr" && v != "":
+				addr = v
 			}
 		}
 		br.clientInfo += ": " + addr + "/" + db
@@ -226,13 +237,13 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 		data string
 		dest *string
 	}{
-		{ name: "KEYSREM",    data: _RS_KEYSREM,    dest: &br._KEYSREM    },
-		{ name: "QDPOPTASKS", data: _RS_QDPOPTASKS, dest: &br._QDPOPTASKS },
-		{ name: "QDUPTASKS",  data: _RS_QDUPTASKS,  dest: &br._QDUPTASKS  },
-		{ name: "QSTAT",      data: _RS_QSTAT,      dest: &br._QSTAT      },
-		{ name: "QRPUSHTASK", data: _RS_QRPUSHTASK, dest: &br._QRPUSHTASK },
-		{ name: "QLPUSHTASK", data: _RS_QLPUSHTASK, dest: &br._QLPUSHTASK },
-		{ name: "QDPUSHTASK", data: _RS_QDPUSHTASK, dest: &br._QDPUSHTASK },
+		{name: "KEYSREM", data: _RS_KEYSREM, dest: &br._KEYSREM},
+		{name: "QDPOPTASKS", data: _RS_QDPOPTASKS, dest: &br._QDPOPTASKS},
+		{name: "QDUPTASKS", data: _RS_QDUPTASKS, dest: &br._QDUPTASKS},
+		{name: "QSTAT", data: _RS_QSTAT, dest: &br._QSTAT},
+		{name: "QRPUSHTASK", data: _RS_QRPUSHTASK, dest: &br._QRPUSHTASK},
+		{name: "QLPUSHTASK", data: _RS_QLPUSHTASK, dest: &br._QLPUSHTASK},
+		{name: "QDPUSHTASK", data: _RS_QDPUSHTASK, dest: &br._QDPUSHTASK},
 	} {
 		if _, err = br.execCmd("SCRIPT", &respStrRaw, CTX_TIMEOUT_DEFAULT, true, "LOAD", script.data); err.IsNotNil() {
 			return nil, err.ReplaceClass(ekaerr.InitializationFailed).
@@ -265,13 +276,14 @@ func (p *RedisBroker) String() string {
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Ping() *ekaerr.Error {
-	const s = "Bokchoy.RedisBroker: Failed to ping Redis server. "
+	const s = "Bokchoy.RedisBroker: Failed to ping Redis server."
 
 	switch {
 	case !p.isValid():
-		return ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
@@ -301,27 +313,27 @@ func (p *RedisBroker) Ping() *ekaerr.Error {
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Consume(queueName string, etaUnixNano int64) ([][]byte, *ekaerr.Error) {
-	const s = "Bokchoy.RedisBroker: Failed to fetch tasks for being consumed. "
+	const s = "Bokchoy.RedisBroker: Failed to fetch tasks for being consumed."
 
 	var (
-		result           []string
-		queueKey         = buildKey1(queueName)
-		maxTTL           = time.Now().UnixNano()
-		err              *ekaerr.Error
-		encodedTasks     [][]byte
-		addLogMessage    string
+		result        []string
+		queueKey      = buildKey1(queueName)
+		maxTTL        = time.Now().UnixNano()
+		err           *ekaerr.Error
+		encodedTasks  [][]byte
+		addLogMessage string
 	)
 
 	if etaUnixNano == 0 {
 		if _, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, false, p._QDUPTASKS, "1", queueKey, maxTTL); err.IsNotNil() {
-			addLogMessage = "Failed to try to up delayed tasks."
+			addLogMessage = " Failed to try to up delayed tasks."
 
-		} else if _, err = p.execFlatCmd("BLPOP", &result, p.tickInterval + CTX_TIMEOUT_DEFAULT, false, queueKey, p.tickInterval.Seconds()); err.IsNotNil() {
-			addLogMessage = "Failed to retrieve ready-to-consumed tasks."
+		} else if _, err = p.execFlatCmd("BLPOP", &result, p.tickInterval+CTX_TIMEOUT_DEFAULT, false, queueKey, p.tickInterval.Seconds()); err.IsNotNil() {
+			addLogMessage = " Failed to retrieve ready-to-consumed tasks."
 		}
 	} else {
 		if _, err = p.execFlatCmd("EVALSHA", &result, CTX_TIMEOUT_DEFAULT, false, p._QDPOPTASKS, "1", queueKey, maxTTL); err.IsNotNil() {
-			addLogMessage = "Failed to retrieve delayed up-to tasks."
+			addLogMessage = " Failed to retrieve delayed up-to tasks."
 		}
 	}
 
@@ -345,7 +357,7 @@ func (p *RedisBroker) Consume(queueName string, etaUnixNano int64) ([][]byte, *e
 	}
 
 	if err.IsNotNil() {
-		return nil, err.AddMessage(s + addLogMessage).
+		return nil, err.AddMessage(s+addLogMessage).
 			WithString("bokchoy_queue_key", queueKey).
 			WithString("bokchoy_queue_name", queueName).
 			Throw()
@@ -361,13 +373,14 @@ func (p *RedisBroker) Consume(queueName string, etaUnixNano int64) ([][]byte, *e
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Get(queueName, taskID string) ([]byte, *ekaerr.Error) {
-	const s = "Bokchoy.RedisBroker: Failed to get specific task. "
+	const s = "Bokchoy.RedisBroker: Failed to get specific task."
 
 	switch {
 	case !p.isValid():
-		return nil, ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return nil, ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
@@ -398,13 +411,14 @@ func (p *RedisBroker) Get(queueName, taskID string) ([]byte, *ekaerr.Error) {
 // If requested task for being deleted is not exist, nil is returned,
 // considering that it's not an error.
 func (p *RedisBroker) Delete(queueName, taskID string) *ekaerr.Error {
-	const s = "Bokchoy.RedisBroker: Failed to delete specific task. "
+	const s = "Bokchoy.RedisBroker: Failed to delete specific task."
 
 	switch {
 	case !p.isValid():
-		return ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
@@ -440,13 +454,14 @@ func (p *RedisBroker) Delete(queueName, taskID string) *ekaerr.Error {
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) List(queueName string) ([][]byte, *ekaerr.Error) {
-	const s = "Bokchoy.RedisBroker: Failed to get tasks from queue. "
+	const s = "Bokchoy.RedisBroker: Failed to get tasks from queue."
 
 	switch {
 	case !p.isValid():
-		return nil, ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return nil, ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
@@ -476,19 +491,20 @@ func (p *RedisBroker) List(queueName string) ([][]byte, *ekaerr.Error) {
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Count(queueName string) (bokchoy.BrokerStats, *ekaerr.Error) {
-	const s = "Bokchoy.RedisBroker: Failed to get a queue stat. "
+	const s = "Bokchoy.RedisBroker: Failed to get a queue stat."
 
 	switch {
 	case !p.isValid():
-		return bokchoy.BrokerStats{}, ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return bokchoy.BrokerStats{}, ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
 	var (
 		rawResp []string
-		stats bokchoy.BrokerStats
+		stats   bokchoy.BrokerStats
 	)
 
 	key := buildKey1(queueName)
@@ -506,22 +522,22 @@ func (p *RedisBroker) Count(queueName string) (bokchoy.BrokerStats, *ekaerr.Erro
 	//  - Lua script.
 
 	if len(rawResp) != 2 {
-		return stats, ekaerr.InternalError.
-			New(s + "QSTAT returns response with length != 2. Bug?").
+		return stats, ekaerr.InternalError.New(s).
+			WithString("description", "QSTAT returns response with length != 2. Bug?").
 			WithString("bokchoy_queue_name", queueName).
 			Throw()
 	}
 
 	var legacyErr error
 	if stats.Direct, legacyErr = strconv.Atoi(rawResp[0]); legacyErr != nil {
-		return stats, ekaerr.InternalError.
-			New(s + "QSTAT returns response and 1st argument is not integer. Bug?").
+		return stats, ekaerr.InternalError.New(s).
+			WithString("description", "QSTAT returns response and 1st argument is not integer. Bug?").
 			WithString("bokchoy_queue_name", queueName).
 			Throw()
 	}
 	if stats.Delayed, legacyErr = strconv.Atoi(rawResp[1]); legacyErr != nil {
-		return stats, ekaerr.InternalError.
-			New(s + "QSTAT returns response and 2nd argument is not integer. Bug?").
+		return stats, ekaerr.InternalError.New(s).
+			WithString("description", "QSTAT returns response and 2nd argument is not integer. Bug?").
 			WithString("bokchoy_queue_name", queueName).
 			Throw()
 	}
@@ -537,13 +553,14 @@ func (p *RedisBroker) Count(queueName string) (bokchoy.BrokerStats, *ekaerr.Erro
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Set(queueName, taskID string, data []byte, ttl time.Duration) *ekaerr.Error {
-	const s = "Bokchoy.RedisBroker: Failed to create or update task. "
+	const s = "Bokchoy.RedisBroker: Failed to create or update task."
 
 	switch {
 	case !p.isValid():
-		return ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
@@ -584,13 +601,14 @@ func (p *RedisBroker) Set(queueName, taskID string, data []byte, ttl time.Durati
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Publish(queueName, taskID string, data []byte, eta int64) *ekaerr.Error {
-	const s = "Bokchoy.RedisBroker: Failed to publish task. "
+	const s = "Bokchoy.RedisBroker: Failed to publish task."
 
 	switch {
 	case !p.isValid():
-		return ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 
@@ -639,21 +657,23 @@ func (p *RedisBroker) Publish(queueName, taskID string, data []byte, eta int64) 
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) Empty(queueName string) *ekaerr.Error {
-	const s = "Bokchoy.RedisBroker: Failed to empty queue. "
+	const s = "Bokchoy.RedisBroker: Failed to empty queue."
 
 	switch {
 	case !p.isValid():
-		return ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 
 	case queueName == "":
 		// WE MUST AVOID TO PASS queueName == "",
 		// CAUSE OTHERWISE ALL Bokchoy's RELATED DATA WILL BE DESTROYED!
-		return ekaerr.IllegalArgument.
-			New(s + "Empty queue name. " +
-				"Use ClearAll() if you want to delete everything!").
+		return ekaerr.IllegalArgument.New(s).
+			WithString("description",
+				"Empty queue name. "+
+					"Use ClearAll() if you want to delete everything!").
 			Throw()
 	}
 
@@ -680,13 +700,14 @@ func (p *RedisBroker) Empty(queueName string) *ekaerr.Error {
 // Nil safe.
 // Returns an error if RedisBroker is not initialized properly.
 func (p *RedisBroker) ClearAll() *ekaerr.Error {
-	const s = "Bokchoy.RedisBroker: Failed to remove all. "
+	const s = "Bokchoy.RedisBroker: Failed to remove all."
 
 	switch {
 	case !p.isValid():
-		return ekaerr.IllegalState.
-			New(s + "Broker is not initialized. " +
-				"Did you even call NewBroker() to get that object?").
+		return ekaerr.IllegalState.New(s).
+			WithString("description",
+				"Broker is not initialized. "+
+					"Did you even call NewBroker() to get that object?").
 			Throw()
 	}
 

@@ -12,7 +12,7 @@
 //
 //     Copyright © 2020. All rights reserved.
 //     Author: Ilya Stroy.
-//     Contacts: qioalice@gmail.com, https://github.com/qioalice
+//     Contacts: iyuryevich@pm.me, https://github.com/qioalice
 //     License: https://opensource.org/licenses/MIT
 
 package bokchoy_redis
@@ -35,7 +35,7 @@ type (
 
 		// --- Additional options ---
 
-		Logger *ekalog.Logger
+		Logger       *ekalog.Logger
 		TickInterval time.Duration
 	}
 )
