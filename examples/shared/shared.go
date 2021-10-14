@@ -19,8 +19,6 @@
 package shared
 
 import (
-	"context"
-	"fmt"
 	"time"
 
 	"github.com/qioalice/ekago/v3/ekaerr"
@@ -30,7 +28,7 @@ import (
 	"github.com/qioalice/bokchoy"
 	"github.com/qioalice/bokchoy_redis"
 
-	"github.com/mediocregopher/radix/v4"
+	"github.com/mediocregopher/radix/v3"
 )
 
 type (
@@ -43,8 +41,10 @@ type (
 //goland:noinspection GoSnakeCaseUsage
 const (
 	LISTEN_NETWORK = "tcp"
-	LISTEN_ADDR    = "127.0.0.1:6379"
-	SELECT_DB      = "12"
+	LISTEN_ADDR    = "127.0.0.1:6378"
+	POOL_SIZE      = 4
+	SELECT_DB      = 12
+	AUTH_PASSWORD  = ""
 )
 
 var (
@@ -54,10 +54,24 @@ var (
 func init() {
 	const s = "BokchoyExample: Failed to initialize. "
 
-	fmt.Println()
+	var dialOpts []radix.DialOpt
+	dialOpts = append(dialOpts, radix.DialSelectDB(SELECT_DB))
 
-	c, legacyErr := radix.PoolConfig{Dialer: radix.Dialer{SelectDB: SELECT_DB}}.
-		New(context.Background(), LISTEN_NETWORK, LISTEN_ADDR)
+	//goland:noinspection GoBoolExpressions
+	if AUTH_PASSWORD != "" {
+		dialOpts = append(dialOpts, radix.DialAuthPass(AUTH_PASSWORD))
+	}
+
+	customConnFunc := func(network, addr string) (radix.Conn, error) {
+		return radix.Dial(network, addr, dialOpts...)
+	}
+
+	c, legacyErr := radix.NewPool(
+		LISTEN_NETWORK,
+		LISTEN_ADDR,
+		POOL_SIZE,
+		radix.PoolConnFunc(customConnFunc),
+	)
 
 	err := ekaerr.InitializationFailed.Wrap(legacyErr, s).
 		WithString("redis_addr", LISTEN_ADDR)

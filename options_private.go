@@ -22,7 +22,7 @@ import (
 
 	"github.com/qioalice/ekago/v3/ekalog"
 
-	"github.com/mediocregopher/radix/v4"
+	"github.com/mediocregopher/radix/v3"
 )
 
 type (

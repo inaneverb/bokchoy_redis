@@ -26,11 +26,12 @@ import (
 
 	"github.com/qioalice/ekago/v3/ekaerr"
 	"github.com/qioalice/ekago/v3/ekalog"
+	"github.com/qioalice/ekago/v3/ekastr"
 	"github.com/qioalice/ekago/v3/ekaunsafe"
 
 	"github.com/qioalice/bokchoy"
 
-	"github.com/mediocregopher/radix/v4"
+	"github.com/mediocregopher/radix/v3"
 )
 
 //goland:noinspection SpellCheckingInspection
@@ -74,12 +75,6 @@ type (
 		_QLPUSHTASK string
 		_QDPUSHTASK string
 	}
-)
-
-//goland:noinspection GoSnakeCaseUsage
-const (
-	// CTX_TIMEOUT_DEFAULT is a timeout that is provided for Redis command to be executed.
-	CTX_TIMEOUT_DEFAULT = 5 * time.Second
 )
 
 // NewBroker creates, initializes and returns a new RedisBroker instance.
@@ -146,7 +141,7 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 
 	// --- Redis server ver 6.2.0 or greater CHECK --- //
 
-	if _, err = br.execCmd("INFO", &respStrRaw, CTX_TIMEOUT_DEFAULT, true); err.IsNotNil() {
+	if _, err = br.execCmd("INFO", &respStrRaw, true); err.IsNotNil() {
 		return nil, err.ReplaceClass(ekaerr.InitializationFailed).AddMessage(s).Throw()
 	}
 
@@ -209,7 +204,7 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 
 	// --- Redis server and client data REQUESTING --- //
 
-	if _, err = br.execCmd("CLIENT", &respStrRaw, CTX_TIMEOUT_DEFAULT, true, "INFO"); err.IsNil() {
+	if _, err = br.execCmd("CLIENT", &respStrRaw, true, "INFO"); err.IsNil() {
 		var (
 			db   = "?"
 			addr = "?"
@@ -245,7 +240,7 @@ func NewBroker(options ...Option) (rb *RedisBroker, err *ekaerr.Error) {
 		{name: "QLPUSHTASK", data: _RS_QLPUSHTASK, dest: &br._QLPUSHTASK},
 		{name: "QDPUSHTASK", data: _RS_QDPUSHTASK, dest: &br._QDPUSHTASK},
 	} {
-		if _, err = br.execCmd("SCRIPT", &respStrRaw, CTX_TIMEOUT_DEFAULT, true, "LOAD", script.data); err.IsNotNil() {
+		if _, err = br.execCmd("SCRIPT", &respStrRaw, true, "LOAD", script.data); err.IsNotNil() {
 			return nil, err.ReplaceClass(ekaerr.InitializationFailed).
 				AddMessage(s).
 				WithString("bokchoy_redis_server_version", redisVersion).
@@ -287,7 +282,7 @@ func (p *RedisBroker) Ping() *ekaerr.Error {
 			Throw()
 	}
 
-	if _, err := p.execCmd("PING", nil, CTX_TIMEOUT_DEFAULT, false); err.IsNotNil() {
+	if _, err := p.execCmd("PING", nil, false); err.IsNotNil() {
 		return err.AddMessage(s).WithString("bokchoy_broker", p.clientInfo).Throw()
 	}
 
@@ -318,21 +313,24 @@ func (p *RedisBroker) Consume(queueName string, etaUnixNano int64) ([][]byte, *e
 	var (
 		result        []string
 		queueKey      = buildKey1(queueName)
-		maxTTL        = time.Now().UnixNano()
+		maxTtl        = time.Now().UnixNano()
 		err           *ekaerr.Error
 		encodedTasks  [][]byte
 		addLogMessage string
 	)
 
+	maxTtlStr := strconv.FormatInt(maxTtl, 10)
+	tickIntervalStr := strconv.FormatInt(int64(p.tickInterval.Seconds()), 10)
+
 	if etaUnixNano == 0 {
-		if _, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, false, p._QDUPTASKS, "1", queueKey, maxTTL); err.IsNotNil() {
+		if _, err = p.execCmd("EVALSHA", nil, false, p._QDUPTASKS, "1", queueKey, maxTtlStr); err.IsNotNil() {
 			addLogMessage = " Failed to try to up delayed tasks."
 
-		} else if _, err = p.execFlatCmd("BLPOP", &result, p.tickInterval+CTX_TIMEOUT_DEFAULT, false, queueKey, p.tickInterval.Seconds()); err.IsNotNil() {
+		} else if _, err = p.execCmd("BLPOP", &result, false, queueKey, tickIntervalStr); err.IsNotNil() {
 			addLogMessage = " Failed to retrieve ready-to-consumed tasks."
 		}
 	} else {
-		if _, err = p.execFlatCmd("EVALSHA", &result, CTX_TIMEOUT_DEFAULT, false, p._QDPOPTASKS, "1", queueKey, maxTTL); err.IsNotNil() {
+		if _, err = p.execCmd("EVALSHA", &result, false, p._QDPOPTASKS, "1", queueKey, maxTtlStr); err.IsNotNil() {
 			addLogMessage = " Failed to retrieve delayed up-to tasks."
 		}
 	}
@@ -386,7 +384,7 @@ func (p *RedisBroker) Get(queueName, taskID string) ([]byte, *ekaerr.Error) {
 
 	var resp []byte
 	key := buildKey2(queueName, taskID)
-	if _, err := p.execCmd("GET", &resp, CTX_TIMEOUT_DEFAULT, false, key); err.IsNotNil() {
+	if _, err := p.execCmd("GET", &resp, false, key); err.IsNotNil() {
 		return nil, err.
 			AddMessage(s).
 			WithString("bokchoy_queue_name", queueName).
@@ -422,7 +420,7 @@ func (p *RedisBroker) Delete(queueName, taskID string) *ekaerr.Error {
 			Throw()
 	}
 
-	if _, err := p.execCmd("UNLINK", nil, CTX_TIMEOUT_DEFAULT, false); err.IsNotNil() {
+	if _, err := p.execCmd("UNLINK", nil, false); err.IsNotNil() {
 		return err.
 			AddMessage(s).
 			WithString("bokchoy_queue_name", queueName).
@@ -466,7 +464,7 @@ func (p *RedisBroker) List(queueName string) ([][]byte, *ekaerr.Error) {
 	}
 
 	var taskIDs []string
-	if _, err := p.execCmd("LRANGE", &taskIDs, CTX_TIMEOUT_DEFAULT, false, "0", "-1"); err.IsNotNil() {
+	if _, err := p.execCmd("LRANGE", &taskIDs, false, "0", "-1"); err.IsNotNil() {
 		return nil, err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
 	}
 
@@ -508,7 +506,7 @@ func (p *RedisBroker) Count(queueName string) (bokchoy.BrokerStats, *ekaerr.Erro
 	)
 
 	key := buildKey1(queueName)
-	if _, err := p.execCmd("EVALSHA", &rawResp, CTX_TIMEOUT_DEFAULT, true, p._QSTAT, key); err.IsNotNil() {
+	if _, err := p.execCmd("EVALSHA", &rawResp, true, p._QSTAT, key); err.IsNotNil() {
 		return stats, err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
 	}
 
@@ -564,13 +562,18 @@ func (p *RedisBroker) Set(queueName, taskID string, data []byte, ttl time.Durati
 			Throw()
 	}
 
-	var err *ekaerr.Error
-	key := buildKey2(queueName, taskID)
+	var (
+		err *ekaerr.Error
+
+		key     = buildKey2(queueName, taskID)
+		dataStr = ekastr.B2S(data)
+	)
 
 	if ttl > time.Second {
-		_, err = p.execFlatCmd("SETEX", nil, CTX_TIMEOUT_DEFAULT, true, key, ttl.Seconds(), data)
+		ttlStr := strconv.FormatInt(int64(ttl.Seconds()), 10)
+		_, err = p.execCmd("SETEX", nil, true, key, ttlStr, dataStr)
 	} else {
-		_, err = p.execFlatCmd("SET", nil, CTX_TIMEOUT_DEFAULT, true, key, data)
+		_, err = p.execCmd("SET", nil, true, key, dataStr)
 	}
 
 	if err.IsNotNil() {
@@ -612,20 +615,25 @@ func (p *RedisBroker) Publish(queueName, taskID string, data []byte, eta int64) 
 			Throw()
 	}
 
-	var err *ekaerr.Error
-	key := buildKey1(queueName)
+	var (
+		err *ekaerr.Error
+
+		key     = buildKey1(queueName)
+		dataStr = ekastr.B2S(data)
+	)
 
 	switch now := time.Now().UnixNano(); {
 
 	case eta == 0:
-		_, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._QRPUSHTASK, "1", key, taskID, data)
+		_, err = p.execCmd("EVALSHA", nil, true, p._QRPUSHTASK, "1", key, taskID, dataStr)
 
 	case eta <= now:
-		_, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._QLPUSHTASK, "1", key, taskID, data)
+		_, err = p.execCmd("EVALSHA", nil, true, p._QLPUSHTASK, "1", key, taskID, dataStr)
 
 	case eta > now:
 		// ETA is after now, delay the task
-		_, err = p.execFlatCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._QDPUSHTASK, "1", key, taskID, eta, data)
+		etaStr := strconv.FormatInt(eta, 10)
+		_, err = p.execCmd("EVALSHA", nil, true, p._QDPUSHTASK, "1", key, taskID, etaStr, dataStr)
 	}
 
 	//goland:noinspection GoNilness
@@ -678,7 +686,7 @@ func (p *RedisBroker) Empty(queueName string) *ekaerr.Error {
 	}
 
 	key := buildKey1(queueName + "*")
-	if _, err := p.execCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._KEYSREM, "1", key); err.IsNotNil() {
+	if _, err := p.execCmd("EVALSHA", nil, true, p._KEYSREM, "1", key); err.IsNotNil() {
 		return err.AddMessage(s).WithString("bokchoy_queue_name", queueName).Throw()
 	}
 
@@ -712,7 +720,7 @@ func (p *RedisBroker) ClearAll() *ekaerr.Error {
 	}
 
 	key := buildKey1("*")
-	if _, err := p.execCmd("EVALSHA", nil, CTX_TIMEOUT_DEFAULT, true, p._KEYSREM, "1", key); err.IsNotNil() {
+	if _, err := p.execCmd("EVALSHA", nil, true, p._KEYSREM, "1", key); err.IsNotNil() {
 		return err.AddMessage(s).Throw()
 	}
 

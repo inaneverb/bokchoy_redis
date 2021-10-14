@@ -19,15 +19,12 @@
 package bokchoy_redis
 
 import (
-	"context"
-	"time"
-
 	"github.com/qioalice/ekago/v3/ekaerr"
 	"github.com/qioalice/ekago/v3/ekastr"
 
 	"github.com/qioalice/bokchoy"
 
-	"github.com/mediocregopher/radix/v4"
+	"github.com/mediocregopher/radix/v3"
 )
 
 //goland:noinspection SpellCheckingInspection,GoSnakeCaseUsage
@@ -133,7 +130,7 @@ func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
 	const s = "Bokchoy.RedisBroker: Failed to get many tasks by its keys."
 
 	var rawResp []string
-	if _, err := p.execCmd("MGET", &rawResp, CTX_TIMEOUT_DEFAULT, false, taskKeys...); err.IsNotNil() {
+	if _, err := p.execCmd("MGET", &rawResp, false, taskKeys...); err.IsNotNil() {
 		return nil, err.AddMessage(s).WithArray("bokchoy_task_keys", taskKeys).Throw()
 	}
 
@@ -151,41 +148,25 @@ func (p *RedisBroker) getMany(taskKeys []string) ([][]byte, *ekaerr.Error) {
 	return resp, nil
 }
 
+//func (p *RedisBroker) execCmd(
+//	cmd string,
+//	dest interface{},
+//	timeout time.Duration,
+//	nilOrEmptyAsErr bool,
+//	args ...string,
+//) (
+//	isNull bool,
+//	err *ekaerr.Error,
+//) {
+//	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, args, nil)
+//	return isNull, err.Throw()
+//}
+
 func (p *RedisBroker) execCmd(
 	cmd string,
 	dest interface{},
-	timeout time.Duration,
 	nilOrEmptyAsErr bool,
 	args ...string,
-) (
-	isNull bool,
-	err *ekaerr.Error,
-) {
-	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, args, nil)
-	return isNull, err.Throw()
-}
-
-func (p *RedisBroker) execFlatCmd(
-	cmd string,
-	dest interface{},
-	timeout time.Duration,
-	nilOrEmptyAsErr bool,
-	args ...interface{},
-) (
-	isNull bool,
-	err *ekaerr.Error,
-) {
-	isNull, err = p.do(cmd, dest, timeout, nilOrEmptyAsErr, nil, args)
-	return isNull, err.Throw()
-}
-
-func (p *RedisBroker) do(
-	cmd string,
-	dest interface{},
-	timeout time.Duration,
-	nilOrEmptyAsErr bool,
-	argsStr []string,
-	args []interface{},
 ) (
 	isNull bool,
 	err *ekaerr.Error,
@@ -194,29 +175,17 @@ func (p *RedisBroker) do(
 
 	var respMaybe interface{}
 	if dest != nil {
-		respMaybe = &radix.Maybe{Rcv: dest}
+		respMaybe = &radix.MaybeNil{Rcv: dest}
 	}
 
-	ctx := context.Background()
-	if timeout > 0 {
-		var cancelFunc context.CancelFunc
-		ctx, cancelFunc = context.WithTimeout(ctx, timeout)
-		defer cancelFunc()
-	}
+	act := radix.Cmd(respMaybe, cmd, args...)
 
-	var act radix.Action
-	if len(args) > 0 {
-		act = radix.FlatCmd(respMaybe, cmd, args...)
-	} else {
-		act = radix.Cmd(respMaybe, cmd, argsStr...)
-	}
-
-	if legacyErr := p.client.Do(ctx, act); legacyErr != nil {
+	if legacyErr := p.client.Do(act); legacyErr != nil {
 		return true, ekaerr.RejectedOperation.Wrap(legacyErr, s, cmd).Throw()
 	}
 
 	isNull = respMaybe != nil &&
-		(respMaybe.(*radix.Maybe).Null || respMaybe.(*radix.Maybe).Empty)
+		(respMaybe.(*radix.MaybeNil).Nil || respMaybe.(*radix.MaybeNil).EmptyArray)
 
 	if nilOrEmptyAsErr && isNull {
 		return true, ekaerr.IllegalState.New(s, cmd).
